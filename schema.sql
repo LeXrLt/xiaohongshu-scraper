@@ -107,6 +107,17 @@ CREATE INDEX IF NOT EXISTS idx_xhs_notes_crawled ON xhs_notes(crawled_at);
 CREATE INDEX IF NOT EXISTS idx_xhs_comments_note ON xhs_comments(note_id);
 CREATE INDEX IF NOT EXISTS idx_xhs_comments_parent ON xhs_comments(parent_id);
 
+-- 阅读器配置：单实例设置，关键词/博主用 JSON 数组保存，cookie 由 API 统一读取。
+CREATE TABLE IF NOT EXISTS reader_config (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+    bloggers JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cookies TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO reader_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
 -- v3: 对齐 substack 模板，补齐 status / updated_at（幂等迁移已存在的旧表）
 ALTER TABLE xhs_notes    ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'ready';
 ALTER TABLE xhs_notes    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();

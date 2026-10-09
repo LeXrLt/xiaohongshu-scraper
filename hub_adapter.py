@@ -47,9 +47,9 @@ def get_pg_connection():
     return psycopg2.connect(
         host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
-        user=os.getenv("POSTGRES_USER", "hub_user"),
-        password=os.getenv("POSTGRES_PASSWORD", "hub_password"),
-        dbname=os.getenv("POSTGRES_DB", "financial_hub"),
+        user=os.getenv("POSTGRES_USER", "xhs_reader"),
+        password=os.getenv("POSTGRES_PASSWORD", ""),
+        dbname=os.getenv("POSTGRES_DB", "xhs_reader"),
     )
 
 

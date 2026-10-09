@@ -60,17 +60,37 @@ npx skills add https://github.com/zdhgreat/xiaohongshu-scraper
 
 ## 配置
 
-复制 `.env.example` 为 `.env` 填 Postgres 连接（不配则只用本地 SQLite）：
+复制 `.env.example` 为 `.env`，统一填写阅读器和爬虫使用的 Postgres 连接：
 
 ```
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
-POSTGRES_USER=xhs
-POSTGRES_PASSWORD=secret
-POSTGRES_DB=financial_hub   # 实际库名，如 financial_hub_v2
+POSTGRES_USER=xhs_reader
+POSTGRES_PASSWORD=xhs_reader_dev_password
+POSTGRES_DB=xhs_reader
 ```
 
 PG 不可用时自动降级为仅 SQLite，不影响爬取。视频分析需 [ffmpeg](https://ffmpeg.org/)（不装则跳过转录，仅 OCR）。
+
+## 独立阅读器
+
+项目包含一个基于 PostgreSQL、Python API 和 Next.js 的阅读器。复制环境变量模板并启动完整开发栈：
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+打开 <http://localhost:3000> 阅读已经同步到 `xhs_notes` 的笔记；设置页可以把关键词、博主和 cookies 保存到 PostgreSQL 的 `reader_config` 表。只启动数据库时使用 `docker compose up -d postgres`，本地运行 API：
+
+```bash
+python -m uvicorn main:app --app-dir web/backend --reload --port 8000
+cd web/frontend && npm install && npm run dev
+```
+
+前端使用 Next.js `/api/*` 同源反代访问 Python API，浏览器不需要直接跨域请求 `:8000`。Docker 内部反代地址是 `http://api:8000`；本地开发时默认是 `http://localhost:8000`。
+
+阅读器 API 的连接信息全部来自根目录 `.env`，真实 `.env` 已加入忽略规则。
 
 ## 目录结构
 
@@ -80,6 +100,9 @@ xiaohongshu-scraper/
 ├── scripts/xhs.py        # CLI 入口 + 命令调度
 ├── hub_adapter.py        # PG 同步 + Hub 集成
 ├── schema.sql            # PG 建表 DDL
+├── web/backend/           # FastAPI 阅读器 API
+├── web/frontend/          # Next.js 阅读器界面
+├── docker-compose.yml     # PostgreSQL + API + 前端
 ├── assets/               # 签名 JS
 └── data/                 # 运行时（xhs.db / media / output，自动生成）
 ```

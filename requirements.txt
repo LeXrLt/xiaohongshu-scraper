@@ -16,3 +16,8 @@ jieba>=0.42.1               # Chinese segmentation + TF-IDF
 # P4 video/image analysis (optional)
 faster-whisper>=1.0         # speech-to-text (local, Chinese supported)
 rapidocr-onnxruntime>=1.3   # OCR (pure Python, CPU)
+# 阅读器 API（web/backend）
+fastapi>=0.115
+uvicorn[standard]>=0.30
+psycopg2-binary>=2.9
+python-dotenv>=1.0

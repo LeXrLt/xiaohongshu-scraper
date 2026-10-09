@@ -135,7 +135,7 @@ def _try_pg_sync() -> None:
             mod.init_schema(pg_conn)
             count = mod.sync_sqlite_to_pg(pg_conn)
             if count:
-                print(f"[PG-SYNC] 已自动同步到 PG ({os.getenv('POSTGRES_DB', 'financial_hub')})")
+                print(f"[PG-SYNC] 已自动同步到 PG ({os.getenv('POSTGRES_DB', 'xhs_reader')})")
         finally:
             pg_conn.close()
     except ImportError:

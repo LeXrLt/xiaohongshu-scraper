@@ -46,8 +46,8 @@ def get_db_connection():
         host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
         user=os.getenv("POSTGRES_READONLY_USER", "hub_readonly"),
-        password=os.getenv("POSTGRES_READONLY_PASSWORD", "hub_password"),
-        dbname=os.getenv("POSTGRES_DB", "financial_hub"),
+        password=os.getenv("POSTGRES_READONLY_PASSWORD", os.getenv("POSTGRES_PASSWORD", "")),
+        dbname=os.getenv("POSTGRES_DB", "xhs_reader"),
     )
     conn.set_session(readonly=True, autocommit=True)
     return conn
