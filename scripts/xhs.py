@@ -144,6 +144,96 @@ def _try_pg_sync() -> None:
         pass  # PG 不可用，不影响主流程
 
 
+def _read_reader_config() -> dict[str, list[str] | str]:
+    """读取阅读器设置页保存的 PG 配置。"""
+    backend_dir = Path(__file__).resolve().parent.parent / "web" / "backend"
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+    from reader_config import config_dict, get_connection, read_config
+
+    conn = get_connection()
+    try:
+        return config_dict(read_config(conn))
+    finally:
+        conn.close()
+
+
+def _parse_reader_cookies(raw: str) -> dict[str, str]:
+    """接受设置页常用的 ``name=value; ...``，也兼容 JSON cookie 对象。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = data.get("cookies", data)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items() if str(k).strip()}
+    except (TypeError, json.JSONDecodeError):
+        pass
+    cookies: dict[str, str] = {}
+    for part in raw.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name.strip():
+            cookies[name.strip()] = value.strip()
+    return cookies
+
+
+def _materialize_reader_account(cookies: dict[str, str]) -> None:
+    """将 PG 中的 cookie 写入现有账号池格式，复用 Fetcher 的认证流程。"""
+    if not cookies:
+        return
+    path = xhs_config.ACCOUNTS_DIR / "reader_config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"_version": 2, "cookies": cookies}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    xhs_config.restrict_file(path)
+
+
+def cmd_crawl_config(args: argparse.Namespace) -> int:
+    """读取 PG 阅读器配置，按配置的关键词和博主执行一轮抓取。"""
+    try:
+        config = _read_reader_config()
+    except Exception as exc:
+        print(f"[ERR] 无法读取 PG 阅读配置：{exc}", file=sys.stderr)
+        return 1
+
+    keywords = [str(item).strip() for item in config.get("keywords", []) if str(item).strip()]
+    bloggers = [str(item).strip() for item in config.get("bloggers", []) if str(item).strip()]
+    cookies = _parse_reader_cookies(str(config.get("cookies", "")))
+    if cookies:
+        _materialize_reader_account(cookies)
+    if not keywords and not bloggers:
+        print("[ERR] PG 中没有配置关键词或博主，请先在设置页填写。", file=sys.stderr)
+        return 1
+    if not cookies and not xhs_accounts.AccountManager().has_accounts():
+        print("[ERR] PG 中没有 cookies，且本地没有可用账号；请先在设置页填写 cookies。", file=sys.stderr)
+        return 1
+
+    common = {
+        "sign_mode": args.sign_mode,
+        "speed_mode": args.speed_mode,
+        "proxy": args.proxy,
+        "account": "reader_config" if cookies else args.account,
+        "download": args.download,
+        "analyze": args.analyze,
+        "resume": args.resume,
+        "max_pages": args.max_pages,
+    }
+    failures = 0
+    for keyword in keywords:
+        print(f"[CONFIG] 抓取关键词：{keyword}")
+        result = cmd_crawl_search(argparse.Namespace(cmd="crawl-search", keyword=keyword, **common))
+        failures += int(result != 0)
+    for blogger in bloggers:
+        print(f"[CONFIG] 抓取博主：{blogger}")
+        result = cmd_crawl_user(argparse.Namespace(cmd="crawl-user", user_id=blogger, **common))
+        failures += int(result != 0)
+    return 2 if failures else 0
+
+
 def _print_correction_hint() -> None:
     """数据写入后检测待纠错视频转录，打印醒目提示，引导执行 correct。"""
     try:
@@ -1502,6 +1592,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_cu.add_argument("--no-analyze", dest="analyze", action="store_false", help="不分析内容")
     _add_common(p_cu)
     p_cu.set_defaults(func=cmd_crawl_user)
+
+    p_cc = sub.add_parser("crawl-config", help="读取 PG 设置页配置，单次抓取关键词和博主")
+    p_cc.add_argument("--max-pages", type=int, default=2,
+                      help="每个关键词/博主最多抓取页数（默认2）")
+    p_cc.add_argument("--resume", action="store_true", help="从上次断点继续")
+    p_cc.add_argument("--download", action="store_true", default=False,
+                      help="自动下载媒体（默认关闭，避免一次运行产生大量文件）")
+    p_cc.add_argument("--no-download", dest="download", action="store_false")
+    p_cc.add_argument("--analyze", action="store_true", default=False,
+                      help="自动分析内容（默认关闭）")
+    p_cc.add_argument("--no-analyze", dest="analyze", action="store_false")
+    _add_common(p_cc)
+    p_cc.set_defaults(func=cmd_crawl_config)
 
     p_clean = sub.add_parser("cleanup", help="数据清理：孤儿媒体、过期缓存")
     p_clean.add_argument("--dry-run", action="store_true", help="只显示要删除的内容")

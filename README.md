@@ -90,6 +90,14 @@ cd web/frontend && npm install && npm run dev
 
 前端使用 Next.js `/api/*` 同源反代访问 Python API，浏览器不需要直接跨域请求 `:8000`。Docker 内部反代地址是 `http://api:8000`；本地开发时默认是 `http://localhost:8000`。
 
+设置页保存配置后，可以从项目根目录执行一次抓取：
+
+```bash
+python scripts/xhs.py crawl-config --max-pages 2
+```
+
+该命令从 PostgreSQL 的 `reader_config` 读取关键词、博主和 cookies，默认只入库、不下载媒体和分析内容。需要媒体时加 `--download`，需要分析时加 `--analyze`；要从上次断点继续则加 `--resume`。
+
 阅读器 API 的连接信息全部来自根目录 `.env`，真实 `.env` 已加入忽略规则。
 
 ## 目录结构
