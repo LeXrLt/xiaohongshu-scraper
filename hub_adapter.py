@@ -26,7 +26,11 @@ from pathlib import Path
 import psycopg2
 from psycopg2.extras import Json
 from dotenv import load_dotenv
-from financial_hub_postgres import FinancialHubClient
+try:
+    # Hub 生命周期能力是可选的；SQLite → PG 数据同步不应依赖它。
+    from financial_hub_postgres import FinancialHubClient
+except ImportError:  # pragma: no cover - 取决于部署是否安装 Hub 扩展
+    FinancialHubClient = None
 
 load_dotenv()
 
@@ -453,6 +457,11 @@ def run_single(target, client, hub_conn):
 
 
 def main():
+    if FinancialHubClient is None:
+        raise RuntimeError(
+            "缺少 financial_hub_postgres；仅同步数据请直接使用 xhs.py，"
+            "无需运行 hub_adapter.py 的 Hub 编排模式。"
+        )
     hub_conn = get_pg_connection()
     try:
         init_schema(hub_conn)

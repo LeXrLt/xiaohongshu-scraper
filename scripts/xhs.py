@@ -2011,7 +2011,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # 命令成功后自动尝试同步到 PG（仅数据写入类命令）
-    _SYNC_COMMANDS = {"note", "user", "search", "crawl-search", "crawl-user",
+    _SYNC_COMMANDS = {"note", "user", "search", "crawl-search", "crawl-user", "crawl-config",
                        "crawl-feed", "feed", "comments", "download", "refresh",
                        "enrich", "run", "serve"}
     if (rc == 0 or rc is None) and getattr(args, 'func', None):
