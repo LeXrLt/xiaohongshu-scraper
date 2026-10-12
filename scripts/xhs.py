@@ -1074,15 +1074,18 @@ def cmd_refresh(args: argparse.Namespace) -> int:
 
 
 def cmd_enrich(args: argparse.Namespace) -> int:
-    """补全搜索入库的半成品笔记（无标题/无详情数据的笔记）。
+    """补全搜索入库的半成品笔记（正文/详情数据缺失的笔记）。
 
     对通过 search 入库但未调详情 API 的笔记，逐条补全标题、描述、媒体等。
     """
     with fetch_session(args) as (fetcher, conn):
-        # 找出"半成品"笔记：标题为空 或 raw_json 很短（搜索摘要）
+        # 搜索结果即使没有正文，也可能带有大量图片和互动元数据，
+        # 因此不能用 raw_json 长度判断是否已补全。正文和描述同时为空
+        # 才是当前需要详情接口补全的可靠条件。
         rows = conn.execute(
             "SELECT note_id, xsec_token, xsec_source, raw_json FROM notes "
-            "WHERE (title = '' OR title IS NULL OR length(raw_json) < 200) "
+            "WHERE NULLIF(TRIM(content), '') IS NULL "
+            "AND NULLIF(TRIM(description), '') IS NULL "
             "AND xsec_token IS NOT NULL AND xsec_token != '' "
             "ORDER BY crawled_at DESC LIMIT ?",
             (args.limit,),
