@@ -29,7 +29,8 @@ POSTGRES_DB=xhs_reader
 商户抽取 Agent 的配置也放在 `.env`，模板见 `.env.example`。运行
 `python scripts/merchant.py extract` 前至少需要配置
 `MERCHANT_AGENT_API_KEY`、`MERCHANT_AGENT_BASE_URL` 和 `MERCHANT_AGENT_MODEL`。
-抽取结果先进入候选表，经过证据校验后再进行商户合并。
+抽取结果先进入候选表，经过证据校验后会自动幂等写入商户索引；已有候选可单独运行
+`python scripts/merchant.py promote`。
 
 ## 常用命令
 
@@ -46,6 +47,7 @@ python scripts/xhs_risk_status.py --summary
 python scripts/query_db.py stats
 python scripts/merchant.py init
 python scripts/merchant.py extract --limit 10
+python scripts/merchant.py promote
 ```
 
 ### 手动同步 PostgreSQL

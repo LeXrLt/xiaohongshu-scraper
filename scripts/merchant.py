@@ -1,14 +1,16 @@
 """商户抽取与候选入库入口。
 
-第一版只把模型结果保存到 ``merchant_extraction_candidates``，不会把模型输出
-直接当成正式商户。SQLite 表由 ``xhs_storage.connect`` 创建；PostgreSQL 表由
-根目录的 ``schema.sql`` 创建。所有 Agent 配置从项目根目录 ``.env`` 读取。
+模型结果先保存到 ``merchant_extraction_candidates``，通过校验后由本脚本幂等
+晋级到 ``merchants`` 和来源关系表。SQLite 表由 ``xhs_storage.connect`` 创建；
+PostgreSQL 表由根目录的 ``schema.sql`` 创建。所有 Agent 配置从项目根目录
+``.env`` 读取。
 
 常用命令::
 
     python scripts/merchant.py init
     python scripts/merchant.py extract --limit 10
     python scripts/merchant.py import --input candidates.json
+    python scripts/merchant.py promote
     python scripts/merchant.py validate --input candidates.json
 
 输入结果只允许包含商户名称、别名、分类、城市/区域、价格、预约信息、关系和
@@ -327,6 +329,135 @@ def _active_categories(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _merchant_id(name: str) -> str:
+    """由应用逻辑生成稳定 ID；模型不能自行生成正式 merchant_id。"""
+    normalized = re.sub(r"\s+", " ", name).strip().casefold()
+    return uuid.uuid5(uuid.NAMESPACE_URL, "xiaohongshu-merchant:" + normalized).hex
+
+
+def _json_load(value: str | None, default: Any) -> Any:
+    try:
+        parsed = json.loads(value or "")
+        return parsed
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
+    """将通过确定性校验的候选幂等写入正式商户索引。"""
+    rows = conn.execute(
+        """
+        SELECT c.*, n.published_at
+        FROM merchant_extraction_candidates c
+        JOIN notes n ON n.note_id = c.note_id
+        WHERE c.status = 'accepted' AND TRIM(c.candidate_name) <> ''
+        ORDER BY c.updated_at, c.candidate_id
+        """
+    ).fetchall()
+    promoted = 0
+    links = 0
+    for row in rows:
+        merchant_id = _merchant_id(row["candidate_name"])
+        aliases = _json_load(row["aliases_json"], [])
+        category_ids = _json_load(row["category_candidates_json"], [])
+        price = _json_load(row["price_json"], {})
+        if not isinstance(aliases, list):
+            aliases = []
+        if not isinstance(category_ids, list):
+            category_ids = []
+        if not isinstance(price, dict):
+            price = {}
+        price_min = price.get("min")
+        price_max = price.get("max")
+        cuisine = [str(item) for item in category_ids if isinstance(item, str) and item.strip()]
+        conn.execute(
+            """INSERT INTO merchants (
+                merchant_id, canonical_name, aliases, city, district, cuisine,
+                price_min, price_max, currency, price_basis, reservation_info,
+                status, confidence, first_seen_at, last_seen_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uncertain', ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(merchant_id) DO UPDATE SET
+                canonical_name=excluded.canonical_name,
+                aliases=CASE WHEN excluded.aliases <> '[]' THEN excluded.aliases ELSE merchants.aliases END,
+                city=CASE WHEN excluded.city <> '' THEN excluded.city ELSE merchants.city END,
+                district=CASE WHEN excluded.district <> '' THEN excluded.district ELSE merchants.district END,
+                cuisine=CASE WHEN excluded.cuisine <> '[]' THEN excluded.cuisine ELSE merchants.cuisine END,
+                price_min=COALESCE(excluded.price_min, merchants.price_min),
+                price_max=COALESCE(excluded.price_max, merchants.price_max),
+                currency=CASE WHEN excluded.currency <> '' THEN excluded.currency ELSE merchants.currency END,
+                price_basis=CASE WHEN excluded.price_basis <> 'unknown' THEN excluded.price_basis ELSE merchants.price_basis END,
+                reservation_info=CASE WHEN excluded.reservation_info <> '' THEN excluded.reservation_info ELSE merchants.reservation_info END,
+                confidence=CASE WHEN excluded.confidence IS NOT NULL AND (merchants.confidence IS NULL OR excluded.confidence > merchants.confidence) THEN excluded.confidence ELSE merchants.confidence END,
+                first_seen_at=CASE WHEN merchants.first_seen_at IS NULL OR merchants.first_seen_at = '' THEN excluded.first_seen_at ELSE MIN(merchants.first_seen_at, excluded.first_seen_at) END,
+                last_seen_at=CASE WHEN excluded.last_seen_at IS NULL OR excluded.last_seen_at = '' THEN merchants.last_seen_at ELSE MAX(COALESCE(merchants.last_seen_at, ''), excluded.last_seen_at) END,
+                updated_at=CURRENT_TIMESTAMP""",
+            (
+                merchant_id,
+                row["candidate_name"],
+                _json_text(aliases, []),
+                row["city"] or "",
+                row["district"] or "",
+                _json_text(cuisine, []),
+                price_min if isinstance(price_min, (int, float)) and not isinstance(price_min, bool) else None,
+                price_max if isinstance(price_max, (int, float)) and not isinstance(price_max, bool) else None,
+                str(price.get("currency", "") or ""),
+                str(price.get("basis", "unknown") or "unknown"),
+                row["reservation_info"] or "",
+                float(row["confidence"]) if row["confidence"] is not None else None,
+                row["published_at"] or "",
+                row["published_at"] or "",
+            ),
+        )
+        promoted += 1
+
+        conn.execute(
+            """INSERT INTO merchant_notes (
+                merchant_id, note_id, relation_type, evidence_text, confidence
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(merchant_id, note_id, relation_type) DO UPDATE SET
+                evidence_text=excluded.evidence_text,
+                confidence=excluded.confidence""",
+            (
+                merchant_id,
+                row["note_id"],
+                row["relation_type"] or "mentioned",
+                row["evidence_text"] or "",
+                row["confidence"],
+            ),
+        )
+
+        for category_id in category_ids:
+            if not isinstance(category_id, str) or not category_id.strip():
+                continue
+            category_exists = conn.execute(
+                "SELECT 1 FROM merchant_categories WHERE category_id = ? AND status = 'active'",
+                (category_id,),
+            ).fetchone()
+            if not category_exists:
+                continue
+            conn.execute(
+                """INSERT INTO merchant_category_links (
+                    merchant_id, category_id, source_note_id, evidence_text,
+                    confidence, is_primary, taxonomy_version
+                ) VALUES (?, ?, ?, ?, ?, ?, 'v1')
+                ON CONFLICT(merchant_id, category_id, source_note_id) DO UPDATE SET
+                    evidence_text=excluded.evidence_text,
+                    confidence=excluded.confidence,
+                    is_primary=excluded.is_primary""",
+                (
+                    merchant_id,
+                    category_id,
+                    row["note_id"],
+                    row["evidence_text"] or "",
+                    row["confidence"],
+                    1 if row["relation_type"] == "primary_review" else 0,
+                ),
+            )
+            links += 1
+    conn.commit()
+    return {"promoted": promoted, "category_links": links}
+
+
 def _load_notes(conn: sqlite3.Connection, note_id: str | None, limit: int) -> list[sqlite3.Row]:
     if note_id:
         rows = conn.execute("SELECT * FROM notes WHERE note_id = ?", (note_id,)).fetchall()
@@ -470,6 +601,7 @@ def extract_notes(conn: sqlite3.Connection, notes: list[sqlite3.Row], config: Me
                 config,
                 [str(exc)],
             )
+    stats.update(promote_candidates(conn))
     return stats
 
 
@@ -482,7 +614,7 @@ def _read_input(path: Path) -> dict[str, Any]:
     return value
 
 
-def import_candidates(conn: sqlite3.Connection, path: Path, config: MerchantAgentConfig) -> tuple[int, int]:
+def import_candidates(conn: sqlite3.Connection, path: Path, config: MerchantAgentConfig) -> tuple[int, int, int]:
     payload = _read_input(path)
     note_id = payload.get("note_id")
     if not note_id:
@@ -504,7 +636,8 @@ def import_candidates(conn: sqlite3.Connection, path: Path, config: MerchantAgen
             invalid += 1
         else:
             valid += 1
-    return valid, invalid
+    promoted = promote_candidates(conn)
+    return valid, invalid, promoted["promoted"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -516,6 +649,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--limit", type=int, default=None)
     import_cmd = sub.add_parser("import", help="校验并导入 Agent 结果 JSON")
     import_cmd.add_argument("--input", required=True, type=Path)
+    sub.add_parser("promote", help="将 accepted 候选幂等写入正式商户索引")
     validate = sub.add_parser("validate", help="校验 Agent 结果 JSON，不写库")
     validate.add_argument("--input", required=True, type=Path)
     return parser
@@ -544,8 +678,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "validate":
                 print(json.dumps({"valid": not errors, "errors": errors}, ensure_ascii=False, indent=2))
                 return 0 if not errors else 2
-            valid, invalid = import_candidates(conn, args.input, config)
-            print(f"导入完成：{valid} 个通过，{invalid} 个进入 needs_review")
+            valid, invalid, promoted = import_candidates(conn, args.input, config)
+            print(f"导入完成：{valid} 个通过，{invalid} 个进入 needs_review，{promoted} 个候选已写入商户索引")
+            return 0
+        if args.command == "promote":
+            result = promote_candidates(conn)
+            print(json.dumps(result, ensure_ascii=False))
             return 0
         limit = args.limit or config.max_notes
         stats = extract_notes(conn, _load_notes(conn, args.note_id, limit), config)

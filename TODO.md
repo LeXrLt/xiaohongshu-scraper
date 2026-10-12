@@ -7,7 +7,7 @@
 
 本次先落地 SQLite / PostgreSQL 的商户数据结构，以及统一的
 `scripts/merchant.py` 入口。Agent 配置统一从 `.env` 读取，模型结果先进入
-`merchant_extraction_candidates`，通过证据校验后再进入后续合并流程。
+`merchant_extraction_candidates`，通过证据校验后幂等写入商户和来源关系表。
 
 ## 1. 背景与目标
 
