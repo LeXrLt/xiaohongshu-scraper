@@ -14,7 +14,10 @@ Fetcher 负责：
 from __future__ import annotations
 
 import json
+import os
 import random
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -384,7 +387,9 @@ class Fetcher:
         if self.burst_remaining <= 0:
             # rest 期间做 auxiliary（模拟"浏览其他内容"）
             self._maybe_auxiliary_request()
-            rest = self._human_delay(*self.speed.rest_gap) * qm
+            # burst 间休息控制在 10-120 秒；避免长尾采样和静默时段倍率把
+            # 这段等待放大到数分钟。
+            rest = max(10.0, min(self._human_delay(*self.speed.rest_gap) * qm, 120.0))
             print(f"[FETCH] burst done, rest {rest:.1f}s（模仿浏览/思考）", file=sys.stderr)
             time.sleep(rest)
             self.burst_remaining = random.randint(*self.speed.burst_size)
@@ -393,11 +398,8 @@ class Fetcher:
             time.sleep(gap)
         self.burst_remaining -= 1
 
-        if self.request_count and self.request_count % self.speed.long_rest_every == 0:
-            self._maybe_refresh_cookies()
-            rest = self._human_delay(*self.speed.long_rest) * qm
-            print(f"[FETCH] 每 {self.speed.long_rest_every} 条强制休息 {rest/60:.1f}min", file=sys.stderr)
-            time.sleep(rest)
+        # Cookie 刷新按独立的请求计数器执行，不插入额外的长时间等待。
+        self._maybe_refresh_cookies()
 
     # -----------------------------------------------------------------
     # 周期性 cookie 刷新：让 websectiga / sec_poison_id 自然更新
@@ -1226,12 +1228,20 @@ class PlaywrightDomSearch:
         # 优先：用真实浏览器 profile（有完整 cookies + localStorage）
         real = self._find_real_browser()
         if real:
-            try:
-                self._init_real_profile(real[0], real[1])
-                return
-            except Exception as e:
-                print(f"[DOM-SEARCH] 真实浏览器模式失败: {e}，降级到 Playwright",
-                      file=sys.stderr)
+            if self._can_debug_profile(real[0], real[1]):
+                try:
+                    self._init_real_profile(real[0], real[1])
+                    return
+                except Exception as e:
+                    print(f"[DOM-SEARCH] 真实浏览器模式失败: {e}，降级到 Playwright",
+                          file=sys.stderr)
+            else:
+                print(
+                    "[DOM-SEARCH] 默认 profile 不适合 Playwright DevTools 调试"
+                    "（Chrome 136+ 限制），"
+                    "跳过真实浏览器，使用 Playwright fallback",
+                    file=sys.stderr,
+                )
 
         # 降级：用 Playwright Chromium + 注入 cookies（best-effort）
         self._init_playwright_fallback(cookies, headless)
@@ -1246,7 +1256,6 @@ class PlaywrightDomSearch:
 
         仅检测 Chromium 系浏览器（Firefox 不支持 Playwright channel 模式）。
         """
-        import os
         if sys.platform == "win32":
             local = os.environ.get("LOCALAPPDATA", "")
             for name, channel in [
@@ -1279,6 +1288,67 @@ class PlaywrightDomSearch:
                 if os.path.isdir(p):
                     return Path(p), channel
         return None
+
+    @staticmethod
+    def _can_debug_profile(profile_path: Path, channel: str) -> bool:
+        """判断是否适合把 profile 交给 Playwright 的持久化上下文。
+
+        Chrome 136 起禁止通过 DevTools remote debugging 使用默认用户目录。
+        Playwright 的 persistent context 会自动启用 remote-debugging-pipe，
+        因此直接传入真实默认 profile 会出现“进程已启动但上下文永远连接不上”
+        并最终等待超时。默认 profile 不应再走这条路径；fallback 会使用项目
+        自己的 profile 并注入 cookie。
+
+        """
+        defaults = {
+            Path.home() / ".config/google-chrome",
+            Path.home() / ".config/microsoft-edge",
+            Path.home() / ".config/BraveSoftware/Brave-Browser",
+            Path.home() / "Library/Application Support/Google/Chrome",
+            Path.home() / "Library/Application Support/Microsoft Edge",
+            Path.home() / "Library/Application Support/BraveSoftware/Brave Browser",
+        }
+        local_app_data_value = os.environ.get("LOCALAPPDATA")
+        if local_app_data_value:
+            local_app_data = Path(local_app_data_value)
+            defaults.update({
+                local_app_data / "Google/Chrome/User Data",
+                local_app_data / "Microsoft/Edge/User Data",
+                local_app_data / "BraveSoftware/Brave-Browser/User Data",
+            })
+        try:
+            is_default = profile_path.expanduser().resolve() in {
+                p.expanduser().resolve() for p in defaults
+            }
+        except OSError:
+            is_default = True
+        if not is_default:
+            return True
+
+        executable = {
+            "chrome": "google-chrome",
+            "msedge": "microsoft-edge",
+            "brave": "brave-browser",
+        }.get(channel, channel)
+        executable_path = shutil.which(executable)
+        if not executable_path:
+            # 无法确认版本时按新 Chrome 处理，避免再次触发 180 秒超时。
+            return False
+        try:
+            result = subprocess.run(
+                [executable_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            match = re.search(r"\b(\d+)(?:\.\d+){1,3}\b", result.stdout)
+            if match:
+                return int(match.group(1)) < 136
+        except (OSError, subprocess.SubprocessError):
+            pass
+        # 版本未知时仍跳过默认 profile，优先保证任务能继续。
+        return False
 
     @staticmethod
     def _close_running_browser(channel: str) -> None:

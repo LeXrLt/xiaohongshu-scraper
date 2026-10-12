@@ -20,17 +20,32 @@ export type Note = {
   note_url: string;
   media_path: string;
   crawled_at?: string;
+  content?: string;
+  video_url?: string;
+  video_transcript?: string;
+  video_ocr_text?: string;
+  video_summary?: string;
+  image_ocr_text?: string;
+  image_summary?: string;
+  image_mermaid?: string;
+  raw_data?: Record<string, unknown>;
 };
 
 export type Settings = { keywords: string[]; bloggers: string[]; cookies: string };
 
-export async function getNotes(keyword = '', blogger = '') {
-  const params = new URLSearchParams({ page: '1', page_size: '24' });
+export async function getNotes(keyword = '', blogger = '', page = 1, pageSize = 24) {
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   if (keyword.trim()) params.set('keyword', keyword.trim());
   if (blogger.trim()) params.set('blogger', blogger.trim());
   const response = await fetch(`${API_URL}/api/notes?${params}`, { cache: 'no-store' });
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<{ items: Note[]; total: number }>;
+}
+
+export async function getNote(noteId: string) {
+  const response = await fetch(`${API_URL}/api/notes/${encodeURIComponent(noteId)}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<Note>;
 }
 
 export async function getSettings() {

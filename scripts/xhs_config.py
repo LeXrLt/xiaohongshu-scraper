@@ -90,13 +90,11 @@ class SpeedProfile:
     burst_size: tuple[int, int]      # 一波连续多少请求
     burst_gap: tuple[float, float]   # 一波内每两个请求间隔
     rest_gap: tuple[float, float]    # 两波之间停顿（"在看内容"）
-    long_rest_every: int             # 多少次请求后强制长停
-    long_rest: tuple[float, float]   # 长停时长（"喝水离开"）
 
 
 SPEED_PROFILES: dict[str, SpeedProfile] = {
-    # paranoid：唯一速度 — 每次 1 请求 → 停 4-10min → 每 15 次强休 15-30min
-    "paranoid": SpeedProfile((1, 1), (40, 80), (240, 600), 15, (900, 1800)),
+    # paranoid：唯一速度 — 每次 1 请求 → 停 10-120s
+    "paranoid": SpeedProfile((1, 1), (40, 80), (10, 120)),
 }
 
 
@@ -398,10 +396,6 @@ def apply_config() -> None:
                     sp.burst_gap = tuple(vals["burst_gap"])
                 if "rest_gap" in vals:
                     sp.rest_gap = tuple(vals["rest_gap"])
-                if "long_rest_every" in vals:
-                    sp.long_rest_every = int(vals["long_rest_every"])
-                if "long_rest" in vals:
-                    sp.long_rest = tuple(vals["long_rest"])
 
     # Keepalive 配置
     _ka = cfg.get("keepalive", {})

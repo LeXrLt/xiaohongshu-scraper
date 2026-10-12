@@ -112,7 +112,9 @@ def list_notes(
                        n.crawled_at
                 FROM xhs_notes n LEFT JOIN xhs_users u ON u.user_id = n.user_id
                 {where}
-                ORDER BY n.crawled_at DESC NULLS LAST
+                ORDER BY NULLIF(n.published_at, '') DESC NULLS LAST,
+                         n.crawled_at DESC NULLS LAST,
+                         n.note_id DESC
                 LIMIT %s OFFSET %s
                 """, [*params, page_size, offset],
             )
