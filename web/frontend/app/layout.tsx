@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import './globals.css';
+import SidebarNav from './sidebar-nav';
 
 export const metadata: Metadata = {
   title: '小红书阅读器',
@@ -11,11 +12,14 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="zh-CN">
       <body>
-        <header className="topbar">
-          <Link href="/" className="brand"><span>◈</span> 小红书阅读器</Link>
-          <nav><Link href="/">阅读</Link><Link href="/settings">设置</Link></nav>
-        </header>
-        <main className="shell">{children}</main>
+        <div className="app-frame">
+          <aside className="sidebar">
+            <Link href="/" className="brand"><span>◈</span><b>小红书阅读器</b></Link>
+            <SidebarNav />
+            <div className="sidebar-footer">PERSONAL READER<br /><span>LOCAL INDEX</span></div>
+          </aside>
+          <div className="content-frame"><main className="shell">{children}</main></div>
+        </div>
       </body>
     </html>
   );

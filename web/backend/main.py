@@ -143,3 +143,117 @@ def get_note(note_id: str) -> dict[str, Any]:
         raise
     except Exception as exc:
         raise _db_error(exc) from exc
+
+
+@app.get("/api/merchants")
+def list_merchants(
+    keyword: str | None = Query(default=None, max_length=120),
+    city: str | None = Query(default=None, max_length=80),
+    district: str | None = Query(default=None, max_length=80),
+    category_id: str | None = Query(default=None, max_length=80),
+    page: int = Query(default=1, ge=1, le=10000),
+    page_size: int = Query(default=24, ge=1, le=100),
+) -> dict[str, Any]:
+    """返回商户摘要；详情和来源笔记由 /api/merchants/{id} 单独读取。"""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if keyword and keyword.strip():
+        value = f"%{keyword.strip()}%"
+        clauses.append("(m.canonical_name ILIKE %s OR m.aliases::text ILIKE %s OR m.cuisine::text ILIKE %s)")
+        params.extend([value, value, value])
+    if city and city.strip():
+        clauses.append("m.city ILIKE %s")
+        params.append(f"%{city.strip()}%")
+    if district and district.strip():
+        clauses.append("m.district ILIKE %s")
+        params.append(f"%{district.strip()}%")
+    if category_id and category_id.strip():
+        clauses.append("EXISTS (SELECT 1 FROM merchant_category_links filter_link WHERE filter_link.merchant_id = m.merchant_id AND filter_link.category_id = %s)")
+        params.append(category_id.strip())
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    offset = (page - 1) * page_size
+    try:
+        with closing(get_connection()) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"SELECT COUNT(*) AS total FROM merchants m {where}", params)
+            total = int(cur.fetchone()["total"])
+            cur.execute(
+                f"""
+                SELECT m.merchant_id, m.canonical_name, m.aliases, m.city, m.district,
+                       m.cuisine, m.price_min, m.price_max, m.currency, m.price_basis,
+                       m.status, m.confidence, m.first_seen_at, m.last_seen_at, m.updated_at,
+                       COUNT(DISTINCT mn.note_id)::int AS note_count,
+                       COALESCE(
+                           jsonb_agg(DISTINCT jsonb_build_object(
+                               'category_id', mc.category_id,
+                               'name', mc.name,
+                               'is_primary', mcl.is_primary
+                           )) FILTER (WHERE mc.category_id IS NOT NULL),
+                           '[]'::jsonb
+                       ) AS categories
+                FROM merchants m
+                LEFT JOIN merchant_notes mn ON mn.merchant_id = m.merchant_id
+                LEFT JOIN merchant_category_links mcl ON mcl.merchant_id = m.merchant_id
+                LEFT JOIN merchant_categories mc ON mc.category_id = mcl.category_id
+                {where}
+                GROUP BY m.merchant_id
+                ORDER BY m.updated_at DESC NULLS LAST, m.canonical_name ASC
+                LIMIT %s OFFSET %s
+                """, [*params, page_size, offset],
+            )
+            items = [dict(row) for row in cur.fetchall()]
+        return {"items": items, "page": page, "page_size": page_size, "total": total}
+    except Exception as exc:
+        raise _db_error(exc) from exc
+
+
+@app.get("/api/merchants/{merchant_id}")
+def get_merchant(merchant_id: str) -> dict[str, Any]:
+    """返回商户详情、分类和可追溯的来源笔记摘要。"""
+    try:
+        with closing(get_connection()) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT merchant_id, canonical_name, aliases, city, district, cuisine,
+                       price_min, price_max, currency, price_basis, reservation_info,
+                       status, confidence, first_seen_at, last_seen_at, updated_at
+                FROM merchants
+                WHERE merchant_id = %s
+                """, (merchant_id,),
+            )
+            merchant = cur.fetchone()
+            if not merchant:
+                raise HTTPException(status_code=404, detail="Merchant not found")
+
+            cur.execute(
+                """
+                SELECT mc.category_id, mc.name, mc.description, mcl.is_primary,
+                       mcl.evidence_text, mcl.confidence, mcl.taxonomy_version
+                FROM merchant_category_links mcl
+                JOIN merchant_categories mc ON mc.category_id = mcl.category_id
+                WHERE mcl.merchant_id = %s
+                ORDER BY mcl.is_primary DESC, mc.sort_order, mc.name
+                """, (merchant_id,),
+            )
+            categories = [dict(row) for row in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT mn.note_id, mn.relation_type, mn.evidence_text, mn.confidence,
+                       n.title, COALESCE(NULLIF(n.content, ''), n.description) AS content,
+                       n.note_url, n.published_at, n.crawled_at
+                FROM merchant_notes mn
+                JOIN xhs_notes n ON n.note_id = mn.note_id
+                WHERE mn.merchant_id = %s
+                ORDER BY n.published_at DESC NULLS LAST, n.crawled_at DESC NULLS LAST
+                """, (merchant_id,),
+            )
+            notes = [dict(row) for row in cur.fetchall()]
+        result = dict(merchant)
+        result["categories"] = categories
+        result["notes"] = notes
+        result["note_count"] = len(notes)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _db_error(exc) from exc
