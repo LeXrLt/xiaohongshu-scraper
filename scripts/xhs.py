@@ -114,15 +114,15 @@ def _desc_preview(note: dict, max_len: int = 50) -> str:
 def _try_pg_sync() -> None:
     """命令成功后自动尝试同步 SQLite → PG（POSTGRES_DB 配置的库）。
 
-    静默失败：PG 不可用、hub_adapter 未安装等情况不影响主流程。
+    静默失败：PG 不可用或同步模块未安装时不影响主流程。
     """
     # 只对会写入数据的命令做同步（login/health/stats 等跳过）
     try:
-        adapter_path = Path(__file__).resolve().parent.parent / "hub_adapter.py"
-        if not adapter_path.exists():
+        sync_path = Path(__file__).resolve().parent.parent / "pg_sync.py"
+        if not sync_path.exists():
             return
         import importlib.util
-        spec = importlib.util.spec_from_file_location("hub_adapter", str(adapter_path))
+        spec = importlib.util.spec_from_file_location("pg_sync", str(sync_path))
         if not spec or not spec.loader:
             return
         mod = importlib.util.module_from_spec(spec)
@@ -130,7 +130,7 @@ def _try_pg_sync() -> None:
 
         pg_conn = mod.get_pg_connection()
         try:
-            # 先建表/迁移列：链路 B（xhs.py 自动同步）不经 hub_adapter.main()，
+            # 先建表/迁移列：自动同步不经过命令行编排入口，
             # 若 PG 库是旧 schema（缺 status/media_path 列），upsert 会静默失败
             mod.init_schema(pg_conn)
             count = mod.sync_sqlite_to_pg(pg_conn)
@@ -139,7 +139,7 @@ def _try_pg_sync() -> None:
         finally:
             pg_conn.close()
     except ImportError:
-        pass  # psycopg2 / financial_hub_postgres 未安装
+        pass  # psycopg2 未安装
     except Exception:
         pass  # PG 不可用，不影响主流程
 

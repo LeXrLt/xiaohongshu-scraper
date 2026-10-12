@@ -1,50 +1,32 @@
-"""小红书 Hub Adapter — Adapter B 模式
-用法: python hub_adapter.py [--target-id ID]
+"""SQLite → PostgreSQL 同步工具。
 
-功能:
-1. 从 Hub crawl_targets 获取启用的 xiaohongshu 目标
-2. subprocess 调用 xhs.py crawl-search/crawl-feed/crawl-user
-3. 读取本地 SQLite (xhs.db) 同步到 Hub PG
-4. 管理 Hub lifecycle (notify_start/end)
+爬虫以 SQLite 为本地数据源；阅读器使用 PostgreSQL。这个模块只负责
+幂等地把本地数据同步到阅读器数据库，不依赖任何外部编排服务。
 
-target_identifier 约定:
-  search:KEYWORD  → xhs.py crawl-search --keyword KEYWORD
-  user:USER_ID    → xhs.py crawl-user --user-id USER_ID
-  feed            → xhs.py crawl-feed
+手动同步：
+    python pg_sync.py
 """
 import json
 import os
-import re
 import sqlite3
-import sys
-import time
-import subprocess
 import logging
+import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg2
 from psycopg2.extras import Json
 from dotenv import load_dotenv
-try:
-    # Hub 生命周期能力是可选的；SQLite → PG 数据同步不应依赖它。
-    from financial_hub_postgres import FinancialHubClient
-except ImportError:  # pragma: no cover - 取决于部署是否安装 Hub 扩展
-    FinancialHubClient = None
 
 load_dotenv()
 
-COMPONENT_NAME = "xiaohongshu_crawler"
-SOURCE_TYPE = "xiaohongshu"
-
-_ADAPTER_DIR = Path(__file__).resolve().parent
-SKILL_DIR = _ADAPTER_DIR / "scripts"
-SKILL_SCRIPT = SKILL_DIR / "xhs.py"
-SCHEMA_PATH = _ADAPTER_DIR / "schema.sql"
-DB_PATH = _ADAPTER_DIR / "data" / "xhs.db"  # xhs_config.ROOT / data / xhs.db
+ROOT = Path(__file__).resolve().parent
+_ADAPTER_DIR = ROOT
+SCHEMA_PATH = ROOT / "schema.sql"
+DB_PATH = ROOT / "data" / "xhs.db"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("hub_xhs_adapter")
+logger = logging.getLogger("xhs_pg_sync")
 
 
 def get_pg_connection():
@@ -157,42 +139,23 @@ def _extract_from_raw(raw_json_str):
     return result
 
 
-_METRICS_RE = re.compile(r'__CRAWL_METRICS__\s*:\s*(\{.*\})')
-
-
-def _parse_metrics(stdout):
-    """从子进程 stdout 解析最后一行 __CRAWL_METRICS__，返回 (found, new, failed)。
-    找不到/解析失败返回 (0, 0, 0)（容错：FatalRiskError 分支不打印该行）。"""
-    if not stdout:
-        return 0, 0, 0
-    matches = _METRICS_RE.findall(stdout)
-    if not matches:
-        return 0, 0, 0
-    try:
-        d = json.loads(matches[-1])
-        return (int(d.get("items_found", 0)),
-                int(d.get("items_new", 0)),
-                int(d.get("items_failed", 0)))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return 0, 0, 0
-
-
 def _scan_media_dirs(sq_conn):
     """对每条笔记正向计算预期媒体目录，检查存在性 → note_id → (相对路径, 是否有文件)。
 
     用 xhs_config.note_media_dir（与写入时完全一致的 sanitize 口径）算目录，
     避免旧实现用原始 title 反推导致的 sanitize/截断/同名标题匹配失败。
     """
-    # xhs_config 位于 scripts/，不在 hub_adapter 默认搜索路径，动态加载
+    # 复用 xhs_config 中的媒体目录规则，避免同步路径与下载路径不一致。
     import sys as _sys
-    if str(SKILL_DIR) not in _sys.path:
-        _sys.path.insert(0, str(SKILL_DIR))
+    scripts_dir = ROOT / "scripts"
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
     try:
         import xhs_config
     except Exception:
         return {}
 
-    data_root = _ADAPTER_DIR / "data"
+    data_root = ROOT / "data"
     mapping = {}
     try:
         note_ids = [r["note_id"] for r in sq_conn.execute("SELECT note_id FROM notes")]
@@ -218,7 +181,7 @@ def _scan_media_dirs(sq_conn):
 # ── SQLite → PG 同步 ──
 
 def sync_sqlite_to_pg(pg_conn):
-    """读取 xhs SQLite 数据库，同步到 Hub PG。"""
+    """读取本地 SQLite 数据库，同步到阅读器 PostgreSQL。"""
     db_path = DB_PATH
     if not db_path.exists():
         logger.warning("  未找到 xhs.db")
@@ -348,149 +311,18 @@ def sync_sqlite_to_pg(pg_conn):
     return synced
 
 
-# ── 构建命令 ──
 
-def build_crawl_cmd(target_identifier):
-    """根据 target_identifier 构建子进程命令。"""
-    if target_identifier.startswith("search:"):
-        keyword = target_identifier[len("search:"):]
-        return [sys.executable, str(SKILL_SCRIPT), "crawl-search", keyword,
-                "--max-pages", "1", "--no-download", "--no-analyze"]
-    elif target_identifier.startswith("user:"):
-        user_id = target_identifier[len("user:"):]
-        return [sys.executable, str(SKILL_SCRIPT), "crawl-user", user_id,
-                "--max-pages", "1", "--no-download", "--no-analyze"]
-    else:
-        return [sys.executable, str(SKILL_SCRIPT), "crawl-feed"]
-
-
-# ── 双向同步：Hub → 本地 ──
-
-def sync_hub_targets_to_local(targets):
-    """从 Hub 读取目标，将 target_identifier 写入本地 SQLite crawl_state 表。"""
-    if not DB_PATH.exists():
-        return
-    sq = sqlite3.connect(str(DB_PATH))
+def main(argv=None) -> None:
+    """执行一次完整的 SQLite → PostgreSQL 同步。"""
+    parser = argparse.ArgumentParser(description="同步本地 SQLite 数据到 PostgreSQL")
+    parser.parse_args(argv)
+    conn = get_pg_connection()
     try:
-        for t in targets:
-            ident = t.target_identifier
-            # 构建 task_id 格式与 xhs.py 一致
-            if ident.startswith("search:"):
-                task_id = f"search:{ident[len('search:'):]}:"
-            elif ident.startswith("user:"):
-                task_id = f"user:{ident[len('user:'):]}:"
-            else:
-                task_id = f"feed:{ident}:"
-            # 仅插入不存在的记录（不覆盖已有状态）
-            existing = sq.execute("SELECT 1 FROM crawl_state WHERE task_id LIKE ?",
-                                  (f"{task_id}%",)).fetchone()
-            if not existing:
-                sq.execute(
-                    "INSERT OR IGNORE INTO crawl_state (task_id, task_type, target_id, cursor, status) "
-                    "VALUES (?, ?, ?, '', 'pending')",
-                    (task_id + "hub", ident.split(":")[0] if ":" in ident else "feed", ident),
-                )
-        sq.commit()
-        logger.info(f"  同步 {len(targets)} 个 Hub 目标到本地 SQLite")
-    except Exception as e:
-        logger.warning(f"  Hub→本地同步失败: {e}")
+        init_schema(conn)
+        count = sync_sqlite_to_pg(conn)
+        print(f"同步完成：{count or 0} rows")
     finally:
-        sq.close()
-
-
-# ── 主流程 ──
-
-def run_single(target, client, hub_conn):
-    target_identifier = target.target_identifier
-    target_name = target.target_name
-
-    run = client.notify_crawl_start(
-        target_id=target.id, component_name=COMPONENT_NAME,
-        metadata={"trigger": "hub_adapter", "target": target_identifier},
-    )
-    logger.info(f"  开始: {target_name} ({target_identifier}) run_id={run.id}")
-
-    cmd = build_crawl_cmd(target_identifier)
-    start_time = time.time()
-    success = False
-    error_msg = None
-    items_found = items_new = items_failed = 0
-
-    # 强制子进程使用 DOM 搜索模式（降低风控风险）
-    child_env = os.environ.copy()
-    child_env["XHS_SEARCH_MODE"] = "dom"
-
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True,
-                                cwd=str(SKILL_DIR), encoding="utf-8", errors="replace",
-                                env=child_env)
-        success = result.returncode == 0
-        items_found, items_new, items_failed = _parse_metrics(result.stdout)
-        if not success:
-            error_msg = f"xhs.py 返回非零: {result.returncode}"
-    except subprocess.CalledProcessError as e:
-        error_msg = f"子进程错误: {str(e)[:200]}"
-        items_found, items_new, items_failed = _parse_metrics(e.output)
-    except Exception as e:
-        error_msg = f"异常: {str(e)[:200]}"
-
-    duration_ms = int((time.time() - start_time) * 1000)
-
-    # 同步数据
-    if success:
-        try:
-            sync_sqlite_to_pg(hub_conn)
-        except Exception as e:
-            logger.error(f"  数据同步失败: {e}")
-
-    client.notify_crawl_end(
-        run_id=run.id, target_id=target.id,
-        component_name=COMPONENT_NAME,
-        success=success,
-        error_message=(error_msg or "")[:500] or None,
-        duration_ms=duration_ms,
-        items_found=items_found,
-        items_new=items_new,
-        items_failed=items_failed,
-    )
-    logger.info(f"  {'OK' if success else 'FAIL'}: {target_name} ({duration_ms}ms)")
-
-
-def main():
-    if FinancialHubClient is None:
-        raise RuntimeError(
-            "缺少 financial_hub_postgres；仅同步数据请直接使用 xhs.py，"
-            "无需运行 hub_adapter.py 的 Hub 编排模式。"
-        )
-    hub_conn = get_pg_connection()
-    try:
-        init_schema(hub_conn)
-        client = FinancialHubClient(hub_conn)
-
-        logger.info(f"扫描 Hub 中 {SOURCE_TYPE} 目标...")
-        targets = client.get_crawl_targets(source_type=SOURCE_TYPE, enabled=True)
-        if not targets:
-            logger.info("没有启用的 xiaohongshu 目标")
-            return
-
-        for t in targets:
-            logger.info(f"  [{t.id}] {t.target_name} -> {t.target_identifier}")
-
-        # 双向同步：Hub 目标 → 本地 SQLite
-        sync_hub_targets_to_local(targets)
-
-        target_id = None
-        for arg in sys.argv[1:]:
-            if arg.startswith("--target-id="):
-                target_id = int(arg.split("=")[1])
-                break
-
-        for target in targets:
-            if target_id and target.id != target_id:
-                continue
-            run_single(target, client, hub_conn)
-    finally:
-        hub_conn.close()
+        conn.close()
 
 
 if __name__ == "__main__":

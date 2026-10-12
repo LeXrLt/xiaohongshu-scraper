@@ -70,7 +70,7 @@ def log_request(
     except OSError as e:
         print(f"[LOG] 写日志失败：{e}", file=sys.stderr)
 
-    # 风控事件：本地日志已记录（run_single adapter 会同步到 Hub PG）
+    # 风控事件记录在本地日志，供 xhs_risk_status.py 事后查看。
     if record["was_rate_limited"]:
         print(f"[RISK] code={code} api={api} account={account} msg={msg[:60]}", file=sys.stderr)
 

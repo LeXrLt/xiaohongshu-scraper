@@ -431,7 +431,7 @@ Mermaid 生成失败 → 静默跳过，image_summary 仍保留
 | `scripts/xhs_storage.py` | 修改 | 3 列 schema 迁移 + `update_image_analysis()` + MD 渲染 + CSV + 状态摘要 |
 | `scripts/xhs_media.py` | 修改 | `post_process_note()` 增加 `elif do_analyze and not is_video` 分支 |
 | `scripts/xhs.py` | 修改 | `cmd_analyze_images()` + `cmd_setup_image()` + 2 个子命令注册 + 帮助文本 |
-| `SKILL.md` | 修改 | 命令表 + MD 模板 + CSV 列数 + 图片分析配置说明 |
+| `README.md` | 修改 | 命令表 + MD 模板 + CSV 列数 + 图片分析配置说明 |
 | `requirements.txt` | 修改 | 新增 `jieba` 依赖 |
 
 ---

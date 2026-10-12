@@ -218,7 +218,7 @@ def upsert_note(conn: sqlite3.Connection, note: dict[str, Any]) -> None:
         "image_ocr_text image_summary image_mermaid raw_json content_hash "
         "content note_url"
     ).split()
-    # content: 优先用 description，PG 同步时 hub_adapter 会从 raw_json.desc 丰富
+    # content: 优先用 description，PG 同步时 pg_sync 会从 raw_json.desc 丰富
     _content = note.get("description", "")
     _note_url = f"https://www.xiaohongshu.com/explore/{note.get('note_id', '')}"
     values = [

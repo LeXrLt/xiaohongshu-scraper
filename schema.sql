@@ -4,7 +4,7 @@
 --
 -- 【列名映射说明】
 -- SQLite               → PG (本文件)          说明
--- raw_json (TEXT)      → raw_data (JSONB)     hub_adapter._sqlite_json() 自动转换
+-- raw_json (TEXT)      → raw_data (JSONB)     pg_sync._sqlite_json() 自动转换
 -- pictures_json (TEXT) → pictures (JSONB)     同上
 -- note_ids_json (TEXT) → note_ids (JSONB)     同上
 -- content (TEXT)       → content (TEXT)       v2 新增，与 SQLite 统一

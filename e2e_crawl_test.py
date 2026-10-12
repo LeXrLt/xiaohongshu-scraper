@@ -1,4 +1,4 @@
-"""End-to-end PG crawl test: fetch user + latest 4 notes, store in SQLite + PG."""
+"""End-to-end crawl test: fetch user + latest 4 notes, store in SQLite + PG."""
 import sys, json, os
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent / 'scripts'))
 
@@ -7,7 +7,7 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-import xhs_sign, xhs_config, xhs_accounts, xhs_storage, sqlite3
+import xhs_sign, xhs_config, xhs_accounts, xhs_storage, sqlite3, pg_sync
 from curl_cffi.requests import Session
 from xhs_api import _normalize_note, _normalize_user
 
@@ -128,14 +128,10 @@ print(f'  Total: {stored} notes stored in SQLite ({xhs_config.DB_PATH})')
 # ── Step 5: Sync to PostgreSQL ──
 print()
 print('[Step 5/5] Syncing SQLite -> PostgreSQL...')
-import importlib.util
-adapter_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hub_adapter.py')
-spec = importlib.util.spec_from_file_location('hub_adapter', adapter_path)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-pg_conn = mod.get_pg_connection()
+pg_conn = pg_sync.get_pg_connection()
 try:
-    count = mod.sync_sqlite_to_pg(pg_conn)
+    pg_sync.init_schema(pg_conn)
+    count = pg_sync.sync_sqlite_to_pg(pg_conn)
     print(f'  PG sync OK: {count} total rows synchronized')
 finally:
     pg_conn.close()
@@ -143,10 +139,9 @@ finally:
 # ── Verify in PG ──
 print()
 print('='*60)
-print('VERIFICATION: Querying PostgreSQL (financial_hub)')
+print('VERIFICATION: Querying configured PostgreSQL')
 print('='*60)
-import psycopg2
-vconn = psycopg2.connect(host='127.0.0.1', port=5432, user='postgres', password='postgres', dbname='financial_hub')
+vconn = pg_sync.get_pg_connection()
 vcur = vconn.cursor()
 vcur.execute(
     'SELECT note_id, title, type, liked_count, published_at FROM xhs_notes WHERE user_id=%s ORDER BY published_at DESC LIMIT 4',
@@ -167,5 +162,5 @@ print('END-TO-END PG CRAWL COMPLETE')
 print(f'User: {nickname} ({TEST_USER_ID})')
 print(f'Latest {stored} notes stored in:')
 print(f'  - SQLite: {xhs_config.DB_PATH}')
-print(f'  - PostgreSQL: financial_hub.xhs_notes')
+print(f'  - PostgreSQL: {os.getenv("POSTGRES_DB", "xhs_reader")}.xhs_notes')
 print('='*60)
