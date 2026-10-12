@@ -116,6 +116,100 @@ CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id);
 CREATE INDEX IF NOT EXISTS idx_notes_crawled ON notes(crawled_at);
 CREATE INDEX IF NOT EXISTS idx_comments_note ON comments(note_id);
 CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id);
+
+-- 商户索引：商户本身不保存门店地址，地点只作为笔记抽取证据的辅助字段。
+CREATE TABLE IF NOT EXISTS merchant_categories (
+    category_id TEXT PRIMARY KEY,
+    parent_id TEXT DEFAULT '',
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    aliases TEXT NOT NULL DEFAULT '[]',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS merchants (
+    merchant_id TEXT PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '[]',
+    city TEXT DEFAULT '',
+    district TEXT DEFAULT '',
+    cuisine TEXT NOT NULL DEFAULT '[]',
+    price_min INTEGER,
+    price_max INTEGER,
+    currency TEXT DEFAULT '',
+    price_basis TEXT DEFAULT 'unknown',
+    reservation_info TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'uncertain',
+    confidence REAL,
+    first_seen_at TEXT,
+    last_seen_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS merchant_category_links (
+    merchant_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    source_note_id TEXT NOT NULL DEFAULT '',
+    evidence_text TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (merchant_id, category_id, source_note_id),
+    FOREIGN KEY (merchant_id) REFERENCES merchants(merchant_id),
+    FOREIGN KEY (category_id) REFERENCES merchant_categories(category_id)
+);
+
+CREATE TABLE IF NOT EXISTS merchant_notes (
+    merchant_id TEXT NOT NULL,
+    note_id TEXT NOT NULL,
+    relation_type TEXT NOT NULL,
+    evidence_text TEXT NOT NULL DEFAULT '',
+    evidence_start INTEGER,
+    evidence_end INTEGER,
+    confidence REAL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (merchant_id, note_id, relation_type),
+    FOREIGN KEY (merchant_id) REFERENCES merchants(merchant_id),
+    FOREIGN KEY (note_id) REFERENCES notes(note_id)
+);
+
+CREATE TABLE IF NOT EXISTS merchant_extraction_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    note_id TEXT NOT NULL,
+    source_content_hash TEXT NOT NULL DEFAULT '',
+    candidate_name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    category_candidates_json TEXT NOT NULL DEFAULT '[]',
+    city TEXT DEFAULT '',
+    district TEXT DEFAULT '',
+    price_json TEXT NOT NULL DEFAULT '{}',
+    reservation_info TEXT DEFAULT '',
+    relation_type TEXT NOT NULL DEFAULT 'mentioned',
+    evidence_text TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    model_name TEXT DEFAULT '',
+    prompt_version TEXT DEFAULT '',
+    extractor_version TEXT NOT NULL DEFAULT 'v1',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT DEFAULT '',
+    raw_response TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (note_id, source_content_hash, extractor_version, candidate_name),
+    FOREIGN KEY (note_id) REFERENCES notes(note_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchants_name ON merchants(canonical_name);
+CREATE INDEX IF NOT EXISTS idx_merchants_city_district ON merchants(city, district);
+CREATE INDEX IF NOT EXISTS idx_merchant_categories_parent ON merchant_categories(parent_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_category_links_category ON merchant_category_links(category_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_notes_note ON merchant_notes(note_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_candidates_note ON merchant_extraction_candidates(note_id);
 """
 
 

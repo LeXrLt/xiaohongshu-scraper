@@ -107,6 +107,95 @@ CREATE INDEX IF NOT EXISTS idx_xhs_notes_crawled ON xhs_notes(crawled_at);
 CREATE INDEX IF NOT EXISTS idx_xhs_comments_note ON xhs_comments(note_id);
 CREATE INDEX IF NOT EXISTS idx_xhs_comments_parent ON xhs_comments(parent_id);
 
+-- 商户索引：商户本身不保存门店地址，地点只作为笔记抽取证据的辅助字段。
+CREATE TABLE IF NOT EXISTS merchant_categories (
+    category_id TEXT PRIMARY KEY,
+    parent_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deprecated')),
+    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS merchants (
+    merchant_id TEXT PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
+    city TEXT NOT NULL DEFAULT '',
+    district TEXT NOT NULL DEFAULT '',
+    cuisine JSONB NOT NULL DEFAULT '[]'::jsonb,
+    price_min INTEGER,
+    price_max INTEGER,
+    currency TEXT NOT NULL DEFAULT '',
+    price_basis TEXT NOT NULL DEFAULT 'unknown',
+    reservation_info TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'uncertain' CHECK (status IN ('active', 'uncertain', 'merged')),
+    confidence REAL,
+    first_seen_at TEXT,
+    last_seen_at TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS merchant_category_links (
+    merchant_id TEXT NOT NULL REFERENCES merchants(merchant_id),
+    category_id TEXT NOT NULL REFERENCES merchant_categories(category_id),
+    source_note_id TEXT NOT NULL DEFAULT '',
+    evidence_text TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (merchant_id, category_id, source_note_id)
+);
+
+CREATE TABLE IF NOT EXISTS merchant_notes (
+    merchant_id TEXT NOT NULL REFERENCES merchants(merchant_id),
+    note_id TEXT NOT NULL REFERENCES xhs_notes(note_id),
+    relation_type TEXT NOT NULL,
+    evidence_text TEXT NOT NULL DEFAULT '',
+    evidence_start INTEGER,
+    evidence_end INTEGER,
+    confidence REAL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (merchant_id, note_id, relation_type)
+);
+
+CREATE TABLE IF NOT EXISTS merchant_extraction_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    note_id TEXT NOT NULL REFERENCES xhs_notes(note_id),
+    source_content_hash TEXT NOT NULL DEFAULT '',
+    candidate_name TEXT NOT NULL,
+    aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
+    category_candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
+    city TEXT NOT NULL DEFAULT '',
+    district TEXT NOT NULL DEFAULT '',
+    price JSONB NOT NULL DEFAULT '{}'::jsonb,
+    reservation_info TEXT NOT NULL DEFAULT '',
+    relation_type TEXT NOT NULL DEFAULT 'mentioned',
+    evidence_text TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    model_name TEXT NOT NULL DEFAULT '',
+    prompt_version TEXT NOT NULL DEFAULT '',
+    extractor_version TEXT NOT NULL DEFAULT 'v1',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT NOT NULL DEFAULT '',
+    raw_response TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (note_id, source_content_hash, extractor_version, candidate_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchants_name ON merchants(canonical_name);
+CREATE INDEX IF NOT EXISTS idx_merchants_city_district ON merchants(city, district);
+CREATE INDEX IF NOT EXISTS idx_merchant_categories_parent ON merchant_categories(parent_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_category_links_category ON merchant_category_links(category_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_notes_note ON merchant_notes(note_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_candidates_note ON merchant_extraction_candidates(note_id);
+
 -- 阅读器配置：单实例设置，关键词/博主用 JSON 数组保存，cookie 由 API 统一读取。
 CREATE TABLE IF NOT EXISTS reader_config (
     id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),

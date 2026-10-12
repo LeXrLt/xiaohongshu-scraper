@@ -178,6 +178,14 @@ def _scan_media_dirs(sq_conn):
     return mapping
 
 
+def _sqlite_has_table(conn, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 # ── SQLite → PG 同步 ──
 
 def sync_sqlite_to_pg(pg_conn):
@@ -305,6 +313,100 @@ def sync_sqlite_to_pg(pg_conn):
             "last_error": row["last_error"] or "",
         }, ["task_id"])
         synced += 1
+
+    # 商户索引（老 SQLite 数据库没有这些表时跳过，升级后 connect 会自动创建）。
+    if _sqlite_has_table(sq, "merchant_categories"):
+        for row in sq.execute("SELECT * FROM merchant_categories"):
+            _pg_upsert(pg_conn, "merchant_categories", {
+                "category_id": row["category_id"],
+                "parent_id": row["parent_id"] or "",
+                "name": row["name"] or "",
+                "description": row["description"] or "",
+                "aliases": _sqlite_json(row["aliases"]),
+                "sort_order": row["sort_order"] or 0,
+                "status": row["status"] or "active",
+                "taxonomy_version": row["taxonomy_version"] or "v1",
+                "created_at": row["created_at"] or now,
+                "updated_at": row["updated_at"] or now,
+            }, ["category_id"])
+            synced += 1
+
+    if _sqlite_has_table(sq, "merchants"):
+        for row in sq.execute("SELECT * FROM merchants"):
+            _pg_upsert(pg_conn, "merchants", {
+                "merchant_id": row["merchant_id"],
+                "canonical_name": row["canonical_name"] or "",
+                "aliases": _sqlite_json(row["aliases"]),
+                "city": row["city"] or "",
+                "district": row["district"] or "",
+                "cuisine": _sqlite_json(row["cuisine"]),
+                "price_min": row["price_min"],
+                "price_max": row["price_max"],
+                "currency": row["currency"] or "",
+                "price_basis": row["price_basis"] or "unknown",
+                "reservation_info": row["reservation_info"] or "",
+                "status": row["status"] or "uncertain",
+                "confidence": row["confidence"],
+                "first_seen_at": row["first_seen_at"],
+                "last_seen_at": row["last_seen_at"],
+                "updated_at": row["updated_at"] or now,
+            }, ["merchant_id"])
+            synced += 1
+
+    if _sqlite_has_table(sq, "merchant_category_links"):
+        for row in sq.execute("SELECT * FROM merchant_category_links"):
+            _pg_upsert(pg_conn, "merchant_category_links", {
+                "merchant_id": row["merchant_id"],
+                "category_id": row["category_id"],
+                "source_note_id": row["source_note_id"] or "",
+                "evidence_text": row["evidence_text"] or "",
+                "confidence": row["confidence"],
+                "is_primary": bool(row["is_primary"]),
+                "taxonomy_version": row["taxonomy_version"] or "v1",
+                "created_at": row["created_at"] or now,
+            }, ["merchant_id", "category_id", "source_note_id"])
+            synced += 1
+
+    if _sqlite_has_table(sq, "merchant_notes"):
+        for row in sq.execute("SELECT * FROM merchant_notes"):
+            _pg_upsert(pg_conn, "merchant_notes", {
+                "merchant_id": row["merchant_id"],
+                "note_id": row["note_id"],
+                "relation_type": row["relation_type"],
+                "evidence_text": row["evidence_text"] or "",
+                "evidence_start": row["evidence_start"],
+                "evidence_end": row["evidence_end"],
+                "confidence": row["confidence"],
+                "created_at": row["created_at"] or now,
+            }, ["merchant_id", "note_id", "relation_type"])
+            synced += 1
+
+    if _sqlite_has_table(sq, "merchant_extraction_candidates"):
+        for row in sq.execute("SELECT * FROM merchant_extraction_candidates"):
+            _pg_upsert(pg_conn, "merchant_extraction_candidates", {
+                "candidate_id": row["candidate_id"],
+                "note_id": row["note_id"],
+                "source_content_hash": row["source_content_hash"] or "",
+                "candidate_name": row["candidate_name"] or "",
+                "aliases": _sqlite_json(row["aliases_json"]),
+                "category_candidates": _sqlite_json(row["category_candidates_json"]),
+                "city": row["city"] or "",
+                "district": row["district"] or "",
+                "price": _sqlite_json(row["price_json"]),
+                "reservation_info": row["reservation_info"] or "",
+                "relation_type": row["relation_type"] or "mentioned",
+                "evidence_text": row["evidence_text"] or "",
+                "confidence": row["confidence"],
+                "model_name": row["model_name"] or "",
+                "prompt_version": row["prompt_version"] or "",
+                "extractor_version": row["extractor_version"] or "v1",
+                "status": row["status"] or "pending",
+                "error_message": row["error_message"] or "",
+                "raw_response": row["raw_response"] or "",
+                "created_at": row["created_at"] or now,
+                "updated_at": row["updated_at"] or now,
+            }, ["candidate_id"])
+            synced += 1
 
     sq.close()
     logger.info(f"  同步 {synced} rows from SQLite to PG")

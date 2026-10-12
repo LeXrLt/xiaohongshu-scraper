@@ -26,6 +26,11 @@ POSTGRES_PASSWORD=your_password
 POSTGRES_DB=xhs_reader
 ```
 
+商户抽取 Agent 的配置也放在 `.env`，模板见 `.env.example`。运行
+`python scripts/merchant.py extract` 前至少需要配置
+`MERCHANT_AGENT_API_KEY`、`MERCHANT_AGENT_BASE_URL` 和 `MERCHANT_AGENT_MODEL`。
+抽取结果先进入候选表，经过证据校验后再进行商户合并。
+
 ## 常用命令
 
 ```bash
@@ -39,6 +44,8 @@ python scripts/xhs.py export --format md
 # 查看本地运行日志
 python scripts/xhs_risk_status.py --summary
 python scripts/query_db.py stats
+python scripts/merchant.py init
+python scripts/merchant.py extract --limit 10
 ```
 
 ### 手动同步 PostgreSQL
@@ -77,6 +84,7 @@ python scripts/xhs.py crawl-config --max-pages 2
 
 ```
 ├── scripts/xhs.py         # 爬虫 CLI
+├── scripts/merchant.py    # 商户表初始化、Agent 抽取与候选校验
 ├── scripts/xhs_storage.py # SQLite 存储与导出
 ├── pg_sync.py             # SQLite → PostgreSQL 同步
 ├── schema.sql             # PostgreSQL 表结构
