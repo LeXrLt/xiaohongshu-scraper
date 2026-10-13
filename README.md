@@ -62,6 +62,8 @@ python pg_sync.py
 
 同步模块只读 `data/xhs.db` 并幂等写入 `xhs_notes`、`xhs_users`、`xhs_comments` 等表，不依赖外部服务。
 
+商户不设核实状态。旧 SQLite 库在下次运行爬虫或 `python scripts/merchant.py init` 时自动移除商户状态字段；旧 PostgreSQL 库在运行 `python pg_sync.py` 时自动移除。迁移保留商户信息和来源关系。
+
 ## 独立阅读器
 
 项目包含 PostgreSQL、Python API 和 Next.js 前端：

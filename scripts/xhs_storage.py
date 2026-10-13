@@ -154,7 +154,6 @@ CREATE TABLE IF NOT EXISTS merchants (
     currency TEXT DEFAULT '',
     price_basis TEXT DEFAULT 'unknown',
     reservation_info TEXT DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'uncertain',
     confidence REAL,
     first_seen_at TEXT,
     last_seen_at TEXT,
@@ -240,7 +239,7 @@ CREATE INDEX IF NOT EXISTS idx_merchant_candidates_note ON merchant_extraction_c
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """无损添加新字段，老 db 也兼容。"""
+    """迁移旧数据库结构，保留笔记、商户和来源关系。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
     if "xsec_token" not in cols:
         conn.execute("ALTER TABLE notes ADD COLUMN xsec_token TEXT DEFAULT ''")
@@ -274,6 +273,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     candidate_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchant_extraction_candidates)").fetchall()}
     if candidate_cols and "tag_candidates_json" not in candidate_cols:
         conn.execute("ALTER TABLE merchant_extraction_candidates ADD COLUMN tag_candidates_json TEXT NOT NULL DEFAULT '[]'")
+    merchant_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchants)").fetchall()}
+    if "status" in merchant_cols:
+        conn.execute("ALTER TABLE merchants DROP COLUMN status")
     conn.commit()
 
 

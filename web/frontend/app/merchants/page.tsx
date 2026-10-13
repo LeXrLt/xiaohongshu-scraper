@@ -119,7 +119,7 @@ export default function MerchantsPage() {
             const tags = (merchant.tags || []).map((tag) => tag.name).filter(Boolean);
             const cuisine = listValue(merchant.cuisine);
             return <article className="merchant-card" key={merchant.merchant_id} role="button" tabIndex={0} onClick={() => openMerchant(merchant)} onKeyDown={(event) => handleKeyDown(event, merchant)}>
-              <div className="merchant-card-top"><span className="merchant-mark">商</span><span className={`merchant-status status-${merchant.status}`}>{merchant.status === 'active' ? '已确认' : '待核实'}</span></div>
+              <span className="merchant-mark">商</span>
               <h2>{merchant.canonical_name || '未命名商户'}</h2>
               <p className="merchant-place">{[merchant.city, merchant.district].filter(Boolean).join(' · ') || '地点未知'}</p>
               <div className="merchant-tags">{[...categories, ...tags, ...cuisine].slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div>
@@ -133,7 +133,7 @@ export default function MerchantsPage() {
           <button className="modal-close" type="button" aria-label="关闭" onClick={() => setSelected(null)}>×</button>
           {detailLoading ? <div className="modal-state">正在读取商户详情…</div> : detailError ? <div className="modal-state error">{detailError}</div> : <div className="merchant-detail-body">
             <p className="eyebrow">MERCHANT DETAIL</p>
-            <div className="merchant-detail-heading"><div><h2 id="merchant-modal-title">{selected.canonical_name || '未命名商户'}</h2><p className="merchant-place">{[selected.city, selected.district].filter(Boolean).join(' · ') || '地点未知'}</p></div><span className={`merchant-status status-${selected.status}`}>{selected.status === 'active' ? '已确认' : '待核实'}</span></div>
+            <div className="merchant-detail-heading"><h2 id="merchant-modal-title">{selected.canonical_name || '未命名商户'}</h2><p className="merchant-place">{[selected.city, selected.district].filter(Boolean).join(' · ') || '地点未知'}</p></div>
             <div className="merchant-detail-grid"><div><small>价格</small><strong>{formatPrice(selected)}</strong></div><div><small>来源笔记</small><strong>{selected.note_count || selected.notes?.length || 0} 篇</strong></div><div><small>置信度</small><strong>{selected.confidence == null ? '未知' : `${Math.round(selected.confidence * 100)}%`}</strong></div></div>
             {listValue(selected.aliases).length > 0 && <div className="detail-section"><small>别名</small><p>{listValue(selected.aliases).join('、')}</p></div>}
             {listValue(selected.cuisine).length > 0 && <div className="detail-section"><small>经营类型</small><p>{listValue(selected.cuisine).join('、')}</p></div>}

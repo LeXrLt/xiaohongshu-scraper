@@ -497,8 +497,8 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
             """INSERT INTO merchants (
                 merchant_id, canonical_name, aliases, city, district, cuisine,
                 price_min, price_max, currency, price_basis, reservation_info,
-                status, confidence, first_seen_at, last_seen_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uncertain', ?, ?, ?, CURRENT_TIMESTAMP)
+                confidence, first_seen_at, last_seen_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(merchant_id) DO UPDATE SET
                 canonical_name=excluded.canonical_name,
                 aliases=CASE WHEN excluded.aliases <> '[]' THEN excluded.aliases ELSE merchants.aliases END,

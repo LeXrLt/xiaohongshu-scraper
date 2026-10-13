@@ -144,7 +144,6 @@ CREATE TABLE IF NOT EXISTS merchants (
     currency TEXT NOT NULL DEFAULT '',
     price_basis TEXT NOT NULL DEFAULT 'unknown',
     reservation_info TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'uncertain' CHECK (status IN ('active', 'uncertain', 'merged')),
     confidence REAL,
     first_seen_at TEXT,
     last_seen_at TEXT,
@@ -242,3 +241,6 @@ ALTER TABLE xhs_users    ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 're
 ALTER TABLE xhs_users    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE xhs_comments ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'ready';
 ALTER TABLE xhs_comments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+-- 移除旧版商户核实状态，重复执行时跳过已删除的字段。
+ALTER TABLE merchants DROP COLUMN IF EXISTS status;

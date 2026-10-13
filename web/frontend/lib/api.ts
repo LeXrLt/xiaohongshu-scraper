@@ -75,7 +75,6 @@ export type Merchant = {
   currency: string;
   price_basis: string;
   reservation_info?: string;
-  status: string;
   confidence: number | null;
   first_seen_at?: string | null;
   last_seen_at?: string | null;

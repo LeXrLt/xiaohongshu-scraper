@@ -180,7 +180,7 @@ def list_merchants(
                 f"""
                 SELECT m.merchant_id, m.canonical_name, m.aliases, m.city, m.district,
                        m.cuisine, m.price_min, m.price_max, m.currency, m.price_basis,
-                       m.status, m.confidence, m.first_seen_at, m.last_seen_at, m.updated_at,
+                       m.confidence, m.first_seen_at, m.last_seen_at, m.updated_at,
                        COUNT(DISTINCT mn.note_id)::int AS note_count,
                        COALESCE(
                            jsonb_agg(DISTINCT jsonb_build_object(
@@ -225,7 +225,7 @@ def get_merchant(merchant_id: str) -> dict[str, Any]:
                 """
                 SELECT merchant_id, canonical_name, aliases, city, district, cuisine,
                        price_min, price_max, currency, price_basis, reservation_info,
-                       status, confidence, first_seen_at, last_seen_at, updated_at
+                       confidence, first_seen_at, last_seen_at, updated_at
                 FROM merchants
                 WHERE merchant_id = %s
                 """, (merchant_id,),

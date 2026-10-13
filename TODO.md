@@ -168,7 +168,6 @@
 | `currency` | TEXT | 价格币种 |
 | `price_basis` | TEXT | `per_person`、`set`、`unknown` |
 | `reservation_info` | TEXT | 预约信息摘要 |
-| `status` | TEXT | `active`、`uncertain`、`merged` |
 | `confidence` | REAL | 综合置信度 |
 | `first_seen_at` | TIMESTAMP | 首次发现时间 |
 | `last_seen_at` | TIMESTAMP | 最近一次被笔记提及的时间 |

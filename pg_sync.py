@@ -349,7 +349,6 @@ def sync_sqlite_to_pg(pg_conn):
                 "currency": row["currency"] or "",
                 "price_basis": row["price_basis"] or "unknown",
                 "reservation_info": row["reservation_info"] or "",
-                "status": row["status"] or "uncertain",
                 "confidence": row["confidence"],
                 "first_seen_at": row["first_seen_at"],
                 "last_seen_at": row["last_seen_at"],
