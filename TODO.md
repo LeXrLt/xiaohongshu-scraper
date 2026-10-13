@@ -2,10 +2,10 @@
 
 > 文档状态：Phase 1-3 商户数据结构、分类/标签字典、候选抽取和商户索引已实现，MCP 待后续阶段
 > 目标：从已经抓取的小红书笔记中提取商户信息、建立分类和商户索引，并通过 MCP 为 Agent 提供只读查询能力。
-> 数据源：现有 SQLite 笔记库，之后沿用 SQLite → PostgreSQL 同步链路。
+> 数据源：PostgreSQL；爬虫、商户抽取与阅读器直接共用同一数据库。
 > 当前约束：本项目已有笔记、用户、评论、商户查询 API 和阅读器；MCP Server 尚未完成。
 
-本次先落地 SQLite / PostgreSQL 的商户数据结构，以及统一的
+当前使用 PostgreSQL 商户数据结构，以及统一的
 `scripts/merchant.py` 入口。Agent 配置统一从 `.env` 读取，模型结果先进入
 `merchant_extraction_candidates`，通过证据校验后幂等写入商户和来源关系表。分类和标签分别使用受控字典，商户与两者都是多对多关系。
 
@@ -55,22 +55,19 @@
                  └─────────┬──────────┘
                            │ 去重、合并、分类
                            ▼
-       ┌───────────────────┴───────────────────┐
-       │                                       │
-       ▼                                       ▼
-┌───────────────┐                       ┌───────────────┐
-│ SQLite 商户索引 │ ───── pg_sync ─────▶ │ PG 商户索引    │
-└───────────────┘                       └───────┬───────┘
-                                                │
-                                                ▼
-                                      ┌────────────────┐
-                                      │ MCP 只读查询层  │
-                                      └───────┬────────┘
-                                              │
-                                              ▼
-                                      ┌────────────────┐
-                                      │ Agent 最终判断  │
-                                      └────────────────┘
+                 ┌────────────────────┐
+                 │ PG 商户索引         │
+                 └─────────┬──────────┘
+                           │
+                           ▼
+                 ┌────────────────────┐
+                 │ MCP 只读查询层       │
+                 └─────────┬──────────┘
+                           │
+                           ▼
+                 ┌────────────────────┐
+                 │ Agent 最终判断       │
+                 └────────────────────┘
 ```
 
 推荐把抽取任务和 MCP 查询分开：抽取任务是离线或定时运行的写入任务，MCP 是低延迟的只读查询服务。
@@ -235,12 +232,12 @@ candidate_id
 note_id
 source_content_hash
 candidate_name
-aliases_json
-category_candidates_json
-tag_candidates_json
+aliases
+category_candidates
+tag_candidates
 city
 district
-price_json
+price
 reservation_info
 relation_type
 evidence_text
@@ -371,15 +368,14 @@ failure_count
 
 主分类和菜系分类可用于后端过滤；场景标签需要附带证据和置信度，供 Agent 做最终判断。
 
-## 8. SQLite、PostgreSQL 与 API
+## 8. PostgreSQL 与 API
 
-当前项目的抓取数据先进入 SQLite，再通过 `pg_sync.py` 同步 PostgreSQL。新增商户表时必须同时完成：
+抓取数据与商户抽取结果直接写入 PostgreSQL。新增商户表时需要同时维护：
 
-1. SQLite schema 和迁移逻辑。
-2. PostgreSQL `schema.sql`。
-3. `pg_sync.py` 的 upsert 和 JSON 字段映射。
-4. 数据库索引和唯一约束。
-5. 回滚或重建索引的运维命令。
+1. PostgreSQL `schema.sql` 与幂等迁移。
+2. 存储和抽取入口的 upsert 与原生 JSONB 字段。
+3. 数据库索引和唯一约束。
+4. 回滚或重建索引的运维命令。
 
 建议新增只读 HTTP API：
 
@@ -517,7 +513,7 @@ Agent 不应把“笔记中提到过”直接表述为“商户当前真实情�
 - 增加 `merchants`、`merchant_categories`、`merchant_category_links`、`merchant_tags`、`merchant_tag_links`、`merchant_notes`。
 - 实现名称标准化和候选合并。
 - 增加分类版本和来源证据。
-- 更新 SQLite、PostgreSQL 和 `pg_sync.py`。
+- 更新 PostgreSQL 表结构与直接入库逻辑。
 
 ### Phase 4：只读 API 与 MCP
 
@@ -550,7 +546,7 @@ Agent 不应把“笔记中提到过”直接表述为“商户当前真实情�
 - 同一笔记重复运行不会重复创建关系。
 - 同一商户的明显别名能够合并或进入待复核。
 - 分类 ID 只能来自有效分类表。
-- SQLite 与 PostgreSQL 同步后数量和关系一致。
+- 抓取与抽取结果入库后，阅读器能直接读取，关系和 JSON 字段保持完整。
 
 ### MCP 行为
 

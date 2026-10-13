@@ -1,8 +1,7 @@
 """商户抽取与候选入库入口。
 
 模型结果先保存到 ``merchant_extraction_candidates``，通过校验后由本脚本幂等
-晋级到 ``merchants`` 和来源关系表。SQLite 表由 ``xhs_storage.connect`` 创建；
-PostgreSQL 表由根目录的 ``schema.sql`` 创建。所有 Agent 配置从项目根目录
+晋级到 ``merchants`` 和来源关系表。所有数据直接写入 PostgreSQL，表结构由根目录的 ``schema.sql`` 维护。所有 Agent 配置从项目根目录
 ``.env`` 读取。
 
 常用命令::
@@ -26,7 +25,6 @@ import json
 import math
 import os
 import re
-import sqlite3
 import sys
 import time
 import uuid
@@ -166,31 +164,20 @@ class MerchantAgentConfig:
         )
 
 
-def note_text(note: sqlite3.Row | dict[str, Any]) -> str:
-    """返回发送给 Agent 的最小公开文本，不包含 raw_json、Cookie 或 token。"""
-    keys = set(note.keys()) if isinstance(note, sqlite3.Row) else set(note)
-    title = str(note.get("title", "") if isinstance(note, dict) else note["title"] or "")
-    content_key = "content" if "content" in keys else "description"
-    if isinstance(note, sqlite3.Row):
-        content = note[content_key] or ""
-        topics = note["topics"] or "[]"
-    else:
-        content = note.get(content_key, "") or ""
-        topics = note.get("topics", []) or []
-    if isinstance(topics, str):
-        try:
-            topics = json.loads(topics)
-        except (TypeError, json.JSONDecodeError):
-            topics = []
+def note_text(note: DictRow | dict[str, Any]) -> str:
+    """返回发送给 Agent 的公开文本，不包含原始数据、Cookie 或 token。"""
+    note = dict(note)
+    topics = note.get("topics") or []
     topic_text = " ".join(str(item) for item in topics if str(item).strip())
-    return "\n".join(part for part in (title, str(content), topic_text) if part.strip())
+    return "\n".join(part for part in (
+        str(note.get("title") or ""),
+        str(note.get("content") or note.get("description") or ""),
+        topic_text,
+    ) if part.strip())
 
 
-def source_hash(note: sqlite3.Row | dict[str, Any]) -> str:
-    existing = note["content_hash"] if isinstance(note, sqlite3.Row) else note.get("content_hash", "")
-    if existing:
-        return str(existing)
-    return hashlib.sha256(note_text(note).encode("utf-8")).hexdigest()
+def source_hash(note: DictRow | dict[str, Any]) -> str:
+    return str(note.get("content_hash") or hashlib.sha256(note_text(note).encode("utf-8")).hexdigest())
 
 
 def _contains(source: str, value: str) -> bool:
@@ -318,15 +305,15 @@ def candidate_id(note_id: str, content_hash: str, extractor_version: str, name: 
 
 
 def save_candidate(
-    conn: sqlite3.Connection,
-    note: sqlite3.Row | dict[str, Any],
+    conn: Connection,
+    note: DictRow | dict[str, Any],
     candidate: dict[str, Any],
     config: MerchantAgentConfig,
     errors: Iterable[str] = (),
     raw_response: str = "",
 ) -> str:
     """幂等保存候选；校验错误进入 needs_review 并保留错误原因。"""
-    note_id = str(note["note_id"] if isinstance(note, sqlite3.Row) else note["note_id"])
+    note_id = str(note["note_id"])
     content_hash = source_hash(note)
     name = str(candidate.get("name", "")).strip()
     cid = candidate_id(note_id, content_hash, config.extractor_version, name)
@@ -340,18 +327,18 @@ def save_candidate(
     conn.execute(
         """INSERT INTO merchant_extraction_candidates (
             candidate_id, note_id, source_content_hash, candidate_name,
-            aliases_json, category_candidates_json, tag_candidates_json, city, district, price_json,
+            aliases, category_candidates, tag_candidates, city, district, price,
             reservation_info, relation_type, evidence_text, confidence,
             model_name, prompt_version, extractor_version, status, error_message,
             raw_response, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT(candidate_id) DO UPDATE SET
-            aliases_json=excluded.aliases_json,
-            category_candidates_json=excluded.category_candidates_json,
-            tag_candidates_json=excluded.tag_candidates_json,
+            aliases=excluded.aliases,
+            category_candidates=excluded.category_candidates,
+            tag_candidates=excluded.tag_candidates,
             city=excluded.city,
             district=excluded.district,
-            price_json=excluded.price_json,
+            price=excluded.price,
             reservation_info=excluded.reservation_info,
             relation_type=excluded.relation_type,
             evidence_text=excluded.evidence_text,
@@ -389,7 +376,7 @@ def save_candidate(
     return cid
 
 
-def _active_categories(conn: sqlite3.Connection) -> set[str]:
+def _active_categories(conn: Connection) -> set[str]:
     return {
         str(row[0])
         for row in conn.execute(
@@ -398,14 +385,14 @@ def _active_categories(conn: sqlite3.Connection) -> set[str]:
     }
 
 
-def _active_tags(conn: sqlite3.Connection) -> set[str]:
+def _active_tags(conn: Connection) -> set[str]:
     return {
         str(row[0])
         for row in conn.execute("SELECT tag_id FROM merchant_tags WHERE status = 'active'")
     }
 
 
-def _active_taxonomy_rows(conn: sqlite3.Connection) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def _active_taxonomy_rows(conn: Connection) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     categories = [
         {"id": row[0], "name": row[1], "parent_id": row[2] or ""}
         for row in conn.execute(
@@ -425,13 +412,13 @@ def _active_taxonomy_rows(conn: sqlite3.Connection) -> tuple[list[dict[str, str]
     return categories, tags
 
 
-def seed_taxonomy(conn: sqlite3.Connection) -> dict[str, int]:
+def seed_taxonomy(conn: Connection) -> dict[str, int]:
     """写入内置分类和标签字典；已有自定义记录不会被覆盖。"""
     for category_id, parent_id, name, description, sort_order in DEFAULT_CATEGORIES:
         conn.execute(
             """INSERT INTO merchant_categories
                 (category_id, parent_id, name, description, sort_order, status, taxonomy_version)
-                VALUES (?, ?, ?, ?, ?, 'active', 'v1')
+                VALUES (%s, %s, %s, %s, %s, 'active', 'v1')
                 ON CONFLICT(category_id) DO NOTHING""",
             (category_id, parent_id, name, description, sort_order),
         )
@@ -439,7 +426,7 @@ def seed_taxonomy(conn: sqlite3.Connection) -> dict[str, int]:
         conn.execute(
             """INSERT INTO merchant_tags
                 (tag_id, group_name, name, status, taxonomy_version)
-                VALUES (?, ?, ?, 'active', 'v1')
+                VALUES (%s, %s, %s, 'active', 'v1')
                 ON CONFLICT(tag_id) DO NOTHING""",
             (tag_id, group_name, name),
         )
@@ -453,22 +440,14 @@ def _merchant_id(name: str) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, "xiaohongshu-merchant:" + normalized).hex
 
 
-def _json_load(value: str | None, default: Any) -> Any:
-    try:
-        parsed = json.loads(value or "")
-        return parsed
-    except (TypeError, json.JSONDecodeError):
-        return default
-
-
-def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
+def promote_candidates(conn: Connection) -> dict[str, int]:
     """将通过确定性校验的候选幂等写入正式商户索引。"""
     seed_taxonomy(conn)
     rows = conn.execute(
         """
         SELECT c.*, n.published_at
         FROM merchant_extraction_candidates c
-        JOIN notes n ON n.note_id = c.note_id
+        JOIN xhs_notes n ON n.note_id = c.note_id
         WHERE c.status = 'accepted' AND TRIM(c.candidate_name) <> ''
         ORDER BY c.updated_at, c.candidate_id
         """
@@ -478,10 +457,10 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
     tag_links = 0
     for row in rows:
         merchant_id = _merchant_id(row["candidate_name"])
-        aliases = _json_load(row["aliases_json"], [])
-        category_ids = _json_load(row["category_candidates_json"], [])
-        tag_ids = _json_load(row["tag_candidates_json"], [])
-        price = _json_load(row["price_json"], {})
+        aliases = (row["aliases"] or [])
+        category_ids = (row["category_candidates"] or [])
+        tag_ids = (row["tag_candidates"] or [])
+        price = (row["price"] or {})
         if not isinstance(aliases, list):
             aliases = []
         if not isinstance(category_ids, list):
@@ -498,7 +477,7 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
                 merchant_id, canonical_name, aliases, city, district, cuisine,
                 price_min, price_max, currency, price_basis, reservation_info,
                 confidence, first_seen_at, last_seen_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT(merchant_id) DO UPDATE SET
                 canonical_name=excluded.canonical_name,
                 aliases=CASE WHEN excluded.aliases <> '[]' THEN excluded.aliases ELSE merchants.aliases END,
@@ -511,8 +490,8 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
                 price_basis=CASE WHEN excluded.price_basis <> 'unknown' THEN excluded.price_basis ELSE merchants.price_basis END,
                 reservation_info=CASE WHEN excluded.reservation_info <> '' THEN excluded.reservation_info ELSE merchants.reservation_info END,
                 confidence=CASE WHEN excluded.confidence IS NOT NULL AND (merchants.confidence IS NULL OR excluded.confidence > merchants.confidence) THEN excluded.confidence ELSE merchants.confidence END,
-                first_seen_at=CASE WHEN merchants.first_seen_at IS NULL OR merchants.first_seen_at = '' THEN excluded.first_seen_at ELSE MIN(merchants.first_seen_at, excluded.first_seen_at) END,
-                last_seen_at=CASE WHEN excluded.last_seen_at IS NULL OR excluded.last_seen_at = '' THEN merchants.last_seen_at ELSE MAX(COALESCE(merchants.last_seen_at, ''), excluded.last_seen_at) END,
+                first_seen_at=CASE WHEN merchants.first_seen_at IS NULL OR merchants.first_seen_at = '' THEN excluded.first_seen_at ELSE LEAST(merchants.first_seen_at, excluded.first_seen_at) END,
+                last_seen_at=CASE WHEN excluded.last_seen_at IS NULL OR excluded.last_seen_at = '' THEN merchants.last_seen_at ELSE GREATEST(COALESCE(merchants.last_seen_at, ''), excluded.last_seen_at) END,
                 updated_at=CURRENT_TIMESTAMP""",
             (
                 merchant_id,
@@ -536,7 +515,7 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
         conn.execute(
             """INSERT INTO merchant_notes (
                 merchant_id, note_id, relation_type, evidence_text, confidence
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT(merchant_id, note_id, relation_type) DO UPDATE SET
                 evidence_text=excluded.evidence_text,
                 confidence=excluded.confidence""",
@@ -553,7 +532,7 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
             if not isinstance(category_id, str) or not category_id.strip():
                 continue
             category_exists = conn.execute(
-                "SELECT 1 FROM merchant_categories WHERE category_id = ? AND status = 'active'",
+                "SELECT 1 FROM merchant_categories WHERE category_id = %s AND status = 'active'",
                 (category_id,),
             ).fetchone()
             if not category_exists:
@@ -562,7 +541,7 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
                 """INSERT INTO merchant_category_links (
                     merchant_id, category_id, source_note_id, evidence_text,
                     confidence, is_primary, taxonomy_version
-                ) VALUES (?, ?, ?, ?, ?, ?, 'v1')
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'v1')
                 ON CONFLICT(merchant_id, category_id, source_note_id) DO UPDATE SET
                     evidence_text=excluded.evidence_text,
                     confidence=excluded.confidence,
@@ -573,7 +552,7 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
                     row["note_id"],
                     row["evidence_text"] or "",
                     row["confidence"],
-                    1 if row["relation_type"] == "primary_review" else 0,
+                    row["relation_type"] == "primary_review",
                 ),
             )
             links += 1
@@ -581,7 +560,7 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
             if not isinstance(tag_id, str) or not tag_id.strip():
                 continue
             tag_exists = conn.execute(
-                "SELECT 1 FROM merchant_tags WHERE tag_id = ? AND status = 'active'",
+                "SELECT 1 FROM merchant_tags WHERE tag_id = %s AND status = 'active'",
                 (tag_id,),
             ).fetchone()
             if not tag_exists:
@@ -589,7 +568,7 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
             conn.execute(
                 """INSERT INTO merchant_tag_links (
                     merchant_id, tag_id, source_note_id, evidence_text, confidence
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT(merchant_id, tag_id, source_note_id) DO UPDATE SET
                     evidence_text=excluded.evidence_text,
                     confidence=excluded.confidence""",
@@ -606,19 +585,19 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
     return {"promoted": promoted, "category_links": links, "tag_links": tag_links}
 
 
-def _load_notes(conn: sqlite3.Connection, note_id: str | None, limit: int) -> list[sqlite3.Row]:
+def _load_notes(conn: Connection, note_id: str | None, limit: int) -> list[DictRow]:
     if note_id:
-        rows = conn.execute("SELECT * FROM notes WHERE note_id = ?", (note_id,)).fetchall()
+        rows = conn.execute("SELECT * FROM xhs_notes WHERE note_id = %s", (note_id,)).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM notes WHERE COALESCE(content, description, title, '') <> '' "
-            "ORDER BY crawled_at DESC LIMIT ?",
+            "SELECT * FROM xhs_notes WHERE COALESCE(content, description, title, '') <> '' "
+            "ORDER BY crawled_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     return list(rows)
 
 
-def _prompt(note: sqlite3.Row, categories: list[dict[str, str]], tags: list[dict[str, str]]) -> str:
+def _prompt(note: DictRow, categories: list[dict[str, str]], tags: list[dict[str, str]]) -> str:
     return json.dumps(
         {
             "note_id": note["note_id"],
@@ -660,7 +639,7 @@ def _decode_agent_content(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def call_agent(
-    note: sqlite3.Row,
+    note: DictRow,
     config: MerchantAgentConfig,
     categories: list[dict[str, str]],
     tags: list[dict[str, str]],
@@ -716,7 +695,7 @@ def call_agent(
     raise RuntimeError(f"Agent 调用失败: {last_error}") from last_error
 
 
-def extract_notes(conn: sqlite3.Connection, notes: list[sqlite3.Row], config: MerchantAgentConfig) -> dict[str, int]:
+def extract_notes(conn: Connection, notes: list[DictRow], config: MerchantAgentConfig) -> dict[str, int]:
     seed_taxonomy(conn)
     valid_categories = _active_categories(conn)
     valid_tags = _active_tags(conn)
@@ -748,6 +727,7 @@ def extract_notes(conn: sqlite3.Connection, notes: list[sqlite3.Row], config: Me
                 flush=True,
             )
         except Exception as exc:
+            conn.rollback()
             stats["failed"] += 1
             print(
                 f"[MERCHANT] [{index}/{total}] 失败: {exc}",
@@ -774,13 +754,13 @@ def _read_input(path: Path) -> dict[str, Any]:
     return value
 
 
-def import_candidates(conn: sqlite3.Connection, path: Path, config: MerchantAgentConfig) -> tuple[int, int, int]:
+def import_candidates(conn: Connection, path: Path, config: MerchantAgentConfig) -> tuple[int, int, int]:
     seed_taxonomy(conn)
     payload = _read_input(path)
     note_id = payload.get("note_id")
     if not note_id:
         raise ValueError("候选文件顶层必须有 note_id")
-    note = conn.execute("SELECT * FROM notes WHERE note_id = ?", (note_id,)).fetchone()
+    note = conn.execute("SELECT * FROM xhs_notes WHERE note_id = %s", (note_id,)).fetchone()
     if note is None:
         raise ValueError(f"找不到笔记: {note_id}")
     merchants = payload.get("merchants", [])
@@ -805,7 +785,7 @@ def import_candidates(conn: sqlite3.Connection, path: Path, config: MerchantAgen
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="商户抽取候选数据工具")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("init", help="初始化 SQLite 商户数据表")
+    sub.add_parser("init", help="初始化 PostgreSQL 商户数据表")
     extract = sub.add_parser("extract", help="调用 .env 中配置的 Agent 抽取笔记")
     extract.add_argument("--note-id")
     extract.add_argument("--limit", type=int, default=None)
@@ -824,11 +804,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             taxonomy = seed_taxonomy(conn)
-            print(f"SQLite 商户数据表已初始化，已载入 {taxonomy['categories']} 个分类和 {taxonomy['tags']} 个标签")
+            print(f"PostgreSQL 商户数据表已初始化，已载入 {taxonomy['categories']} 个分类和 {taxonomy['tags']} 个标签")
             return 0
         if args.command in {"import", "validate"}:
             payload = _read_input(args.input)
-            note = conn.execute("SELECT * FROM notes WHERE note_id = ?", (payload.get("note_id", ""),)).fetchone()
+            note = conn.execute("SELECT * FROM xhs_notes WHERE note_id = %s", (payload.get("note_id", ""),)).fetchone()
             if note is None:
                 raise ValueError(f"找不到笔记: {payload.get('note_id', '')}")
             seed_taxonomy(conn)

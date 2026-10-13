@@ -36,6 +36,7 @@ import xhs_media
 import xhs_proxy
 import xhs_sign
 import xhs_storage
+from database import Connection
 
 # 从拆分模块导入核心类和函数
 from xhs_fetcher import Fetcher, FatalRiskError
@@ -62,7 +63,7 @@ def _try_upsert_user_from_note(note: dict, conn) -> None:
     user_id = note.get("user_id")
     if not user_id:
         return
-    raw = note.get("raw") or note.get("raw_json")
+    raw = note.get("raw") or note.get("raw_data")
     if isinstance(raw, str):
         try:
             import json as _json
@@ -85,7 +86,7 @@ def _type_tag(note: dict) -> str:
     """生成类型标签: [图文·9图] / [视频]。"""
     if note.get("type") == "video":
         return "视频"
-    raw = note.get("raw") or note.get("raw_json")
+    raw = note.get("raw") or note.get("raw_data")
     if isinstance(raw, str):
         try:
             import json as _json
@@ -109,39 +110,6 @@ def _desc_preview(note: dict, max_len: int = 50) -> str:
         extra = desc[:max_len].replace("\n", " ")
         return f"{title} | {extra}{'...' if len(desc) > max_len else ''}"
     return title
-
-
-def _try_pg_sync() -> None:
-    """命令成功后自动尝试同步 SQLite → PG（POSTGRES_DB 配置的库）。
-
-    静默失败：PG 不可用或同步模块未安装时不影响主流程。
-    """
-    # 只对会写入数据的命令做同步（login/health/stats 等跳过）
-    try:
-        sync_path = Path(__file__).resolve().parent.parent / "pg_sync.py"
-        if not sync_path.exists():
-            return
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("pg_sync", str(sync_path))
-        if not spec or not spec.loader:
-            return
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-
-        pg_conn = mod.get_pg_connection()
-        try:
-            # 先建表/迁移列：自动同步不经过命令行编排入口，
-            # 若 PG 库是旧 schema（缺 status/media_path 列），upsert 会静默失败
-            mod.init_schema(pg_conn)
-            count = mod.sync_sqlite_to_pg(pg_conn)
-            if count:
-                print(f"[PG-SYNC] 已自动同步到 PG ({os.getenv('POSTGRES_DB', 'xhs_reader')})")
-        finally:
-            pg_conn.close()
-    except ImportError:
-        pass  # psycopg2 未安装
-    except Exception:
-        pass  # PG 不可用，不影响主流程
 
 
 def _read_reader_config() -> dict[str, list[str] | str]:
@@ -321,15 +289,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Generator
 
 @contextmanager
-def fetch_session(args) -> Generator[tuple[Fetcher, sqlite3.Connection], None, None]:
+def fetch_session(args) -> Generator[tuple[Fetcher, Connection], None, None]:
     """统一管理 fetcher 和 DB conn 的创建/清理，消除 cmd_* 中的 try/finally 样板。"""
-    import sqlite3
-    fetcher = _make_fetcher(args)
     conn = xhs_storage.connect()
     try:
-        yield fetcher, conn
+        fetcher = _make_fetcher(args)
+        try:
+            yield fetcher, conn
+        finally:
+            fetcher.close()
     finally:
-        fetcher.close()
         conn.close()
 
 
@@ -836,16 +805,12 @@ def cmd_health(args: argparse.Namespace) -> int:
     try:
         conn = xhs_storage.connect()
         try:
-            result = conn.execute("PRAGMA integrity_check").fetchone()
-            if result[0] == "ok":
-                print("  OK   SQLite 完整性检查通过")
-                total = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
-                users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-                comments = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-                print(f"  INFO notes: {total} | users: {users} | comments: {comments}")
-            else:
-                print(f"  CRIT SQLite 完整性异常: {result[0]}")
-                issues.append((2, f"数据库损坏: {result[0]}"))
+            conn.execute("SELECT 1").fetchone()
+            print("  OK   PostgreSQL 连接与查询正常")
+            total = conn.execute("SELECT COUNT(*) FROM xhs_notes").fetchone()[0]
+            users = conn.execute("SELECT COUNT(*) FROM xhs_users").fetchone()[0]
+            comments = conn.execute("SELECT COUNT(*) FROM xhs_comments").fetchone()[0]
+            print(f"  INFO notes: {total} | users: {users} | comments: {comments}")
         finally:
             conn.close()
     except Exception as e:
@@ -875,7 +840,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         if media_dir.exists():
             # 收集所有有效的媒体目录
             valid_paths: set[Path] = set()
-            for (note_id,) in conn.execute("SELECT note_id FROM notes").fetchall():
+            for (note_id,) in conn.execute("SELECT note_id FROM xhs_notes").fetchall():
                 new_dir = xhs_config.note_media_dir(note_id, conn)
                 valid_paths.add(new_dir.resolve())
                 valid_paths.add((media_dir / note_id).resolve())
@@ -903,51 +868,34 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             else:
                 print("  孤儿媒体: 无")
 
-        # 2. 过期 search_cache
+        # 2. 搜索缓存与抓取状态；预览只查询，不执行删除。
         cache_days = getattr(args, "max_cache_days", 30)
-        deleted_cache = 0
-        if cache_days > 0:
-            try:
-                # 删除空记录 + 超龄记录
-                deleted_cache += conn.execute(
-                    "DELETE FROM search_cache WHERE note_ids_json = '' OR note_ids_json = '[]'"
-                ).rowcount
-                deleted_cache += conn.execute(
-                    "DELETE FROM search_cache WHERE crawled_at < datetime('now', ?)",
-                    (f"-{cache_days} days",),
-                ).rowcount
-            except Exception:
-                pass
-        if dry and deleted_cache:
-            print(f"  [DRY-RUN] 将清理 {deleted_cache} 条空搜索缓存")
-        elif deleted_cache:
-            print(f"  搜索缓存: 已清理 {deleted_cache} 条空记录")
-
-        # 3. 过期 crawl_state
         state_days = getattr(args, "max_state_days", 7)
-        if state_days > 0:
-            try:
-                deleted_state = conn.execute(
-                    "DELETE FROM crawl_state WHERE status IN ('completed', 'paused')"
-                ).rowcount
-                if deleted_state:
-                    label = "将清理" if dry else "已清理"
-                    print(f"  抓取状态: {label} {deleted_state} 条已完成/暂停记录")
-                else:
-                    print("  抓取状态: 无需清理")
-            except Exception:
-                pass
+        for table, condition, params, label in (
+            ("xhs_search_cache", "note_ids = '[]'::jsonb OR crawled_at < NOW() - %s * INTERVAL '1 day'", (cache_days,), "搜索缓存"),
+            ("xhs_crawl_state", "status IN ('completed', 'paused') AND updated_at < NOW() - %s * INTERVAL '1 day'", (state_days,), "抓取状态"),
+        ):
+            if params[0] <= 0:
+                continue
+            if dry:
+                count = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {condition}", params).fetchone()[0]
+                print(f"  [DRY-RUN] {label}: 将清理 {count} 条记录")
+            else:
+                count = conn.execute(f"DELETE FROM {table} WHERE {condition}", params).rowcount
+                print(f"  {label}: 已清理 {count} 条记录")
+        conn.commit()
 
-        if not dry:
-            conn.commit()
-
-        # 4. VACUUM
-        if getattr(args, "vacuum", False) and not dry:
-            print("  VACUUM: 正在压缩数据库...")
-            conn.execute("VACUUM")
-            print("  VACUUM: 完成")
-        elif getattr(args, "vacuum", False):
-            print("  [DRY-RUN] VACUUM: 将压缩数据库")
+        if getattr(args, "vacuum", False):
+            if dry:
+                print("  [DRY-RUN] VACUUM: 将整理数据表")
+            else:
+                print("  VACUUM: 正在整理数据表...")
+                conn.autocommit = True
+                try:
+                    conn.execute("VACUUM (ANALYZE) xhs_notes, xhs_users, xhs_comments, xhs_search_cache, xhs_crawl_state")
+                finally:
+                    conn.autocommit = False
+                print("  VACUUM: 完成")
 
         print("[OK] 数据清理完成")
         return 0
@@ -1009,7 +957,6 @@ def cmd_correct(args: argparse.Namespace) -> int:
             summary="agent纠错",
         )
         print(f"[OK] 已写回纠错转录: {note_id} (video_summary=agent纠错)")
-        _try_pg_sync()  # 纠错是数据变更，写回后同步到 PG
         _print_correction_hint()  # 提示剩余待纠错（让 Agent 知道是否还有未处理项）
         return 0
     finally:
@@ -1023,8 +970,8 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         with fetch_session(args) as (fetcher, conn):
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=args.max_age_hours)).strftime("%Y-%m-%d %H:%M:%S")
             rows = conn.execute(
-                "SELECT note_id, xsec_token, xsec_source FROM notes "
-                "WHERE crawled_at < ? ORDER BY crawled_at ASC LIMIT ?",
+                "SELECT note_id, xsec_token, xsec_source FROM xhs_notes "
+                "WHERE crawled_at < %s ORDER BY crawled_at ASC LIMIT %s",
                 (cutoff, args.limit),
             ).fetchall()
             if not rows:
@@ -1049,7 +996,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
                         note["xsec_source"] = xsec_source
                     # 检查是否被跳过（content_hash 相同）
                     old_hash = conn.execute(
-                        "SELECT content_hash FROM notes WHERE note_id = ?", (note_id,)
+                        "SELECT content_hash FROM xhs_notes WHERE note_id = %s", (note_id,)
                     ).fetchone()
                     old_hash_val = old_hash["content_hash"] if old_hash else ""
                     xhs_storage.upsert_note(conn, note)
@@ -1080,14 +1027,14 @@ def cmd_enrich(args: argparse.Namespace) -> int:
     """
     with fetch_session(args) as (fetcher, conn):
         # 搜索结果即使没有正文，也可能带有大量图片和互动元数据，
-        # 因此不能用 raw_json 长度判断是否已补全。正文和描述同时为空
+        # 因此不能用 raw_data 长度判断是否已补全。正文和描述同时为空
         # 才是当前需要详情接口补全的可靠条件。
         rows = conn.execute(
-            "SELECT note_id, xsec_token, xsec_source, raw_json FROM notes "
+            "SELECT note_id, xsec_token, xsec_source, raw_data FROM xhs_notes "
             "WHERE NULLIF(TRIM(content), '') IS NULL "
             "AND NULLIF(TRIM(description), '') IS NULL "
             "AND xsec_token IS NOT NULL AND xsec_token != '' "
-            "ORDER BY crawled_at DESC LIMIT ?",
+            "ORDER BY crawled_at DESC LIMIT %s",
             (args.limit,),
         ).fetchall()
         if not rows:
@@ -1156,7 +1103,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             elif user_id:
                 # 按博主批量导出
                 rows = conn.execute(
-                    "SELECT note_id FROM notes WHERE user_id = ? ORDER BY rowid",
+                    "SELECT note_id FROM xhs_notes WHERE user_id = %s ORDER BY crawled_at, note_id",
                     (user_id,)
                 ).fetchall()
                 if not rows:
@@ -1174,13 +1121,13 @@ def cmd_export(args: argparse.Namespace) -> int:
                 print("[ERR] --format md 需配合 --note <id> 或 --user <user_id>", file=sys.stderr)
                 return 1
         elif args.format == "json":
-            total = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM xhs_notes").fetchone()[0]
             path = xhs_storage.write_json(conn, user_id=user_id)
             label = f"（用户 {user_id}）" if user_id else f"（共 {total} 条笔记）"
             print(f"[OK] 已导出 JSON{label}")
             print(f"     文件: {path}")
         elif args.format == "xlsx":
-            total = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM xhs_notes").fetchone()[0]
             try:
                 path = xhs_storage.write_xlsx(conn, user_id=user_id)
                 label = f"（用户 {user_id}）" if user_id else f"（共 {total} 条笔记）"
@@ -1189,7 +1136,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             except ImportError:
                 return 1
         else:
-            total = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM xhs_notes").fetchone()[0]
             files = xhs_storage.write_csv(conn, user_id=user_id)
             label = f"（用户 {user_id}）" if user_id else f"（共 {total} 条笔记）"
             print(f"[OK] 已导出 CSV{label}")
@@ -1613,7 +1560,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--dry-run", action="store_true", help="只显示要删除的内容")
     p_clean.add_argument("--max-cache-days", type=int, default=30, help="清理 N 天前的空搜索缓存（默认 30）")
     p_clean.add_argument("--max-state-days", type=int, default=7, help="清理 N 天前的已完成抓取状态（默认 7）")
-    p_clean.add_argument("--vacuum", action="store_true", help="SQLite VACUUM 压缩数据库")
+    p_clean.add_argument("--vacuum", action="store_true", help="PostgreSQL VACUUM ANALYZE 整理数据表")
     p_clean.set_defaults(func=cmd_cleanup)
 
     p_corr = sub.add_parser("correct", help="Agent 手动纠错视频转录：列出/读取/写回")
@@ -2013,19 +1960,8 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         return 1
 
-    # 命令成功后自动尝试同步到 PG（仅数据写入类命令）
-    _SYNC_COMMANDS = {"note", "user", "search", "crawl-search", "crawl-user", "crawl-config",
-                       "crawl-feed", "feed", "comments", "download", "refresh",
-                       "enrich", "run", "serve"}
-    if (rc == 0 or rc is None) and getattr(args, 'func', None):
-        cmd_name = getattr(args.func, '__name__', '') or ''
-        # cmd_name 格式: cmd_xxx
-        base_cmd = cmd_name.replace('cmd_', '').replace('_', '-')
-        if base_cmd in _SYNC_COMMANDS:
-            _try_pg_sync()
-            # 只在带 --analyze 的命令后提示纠错（减噪：download/comments/feed 等不提示）
-            if getattr(args, "analyze", False):
-                _print_correction_hint()
+    if (rc == 0 or rc is None) and getattr(args, "analyze", False):
+        _print_correction_hint()
 
     return rc if rc else 0
 

@@ -188,7 +188,7 @@ def _compute_content_hash(note: dict) -> str:
     """计算笔记关键字段的轻量 hash，用于增量更新检测。
 
     覆盖：标题、描述、互动数据、类型、话题、xsec_token、视频URL。
-    不含 raw_json（太大且包含不稳定的临时字段）。
+    不含 原始 JSON（太大且包含不稳定的临时字段）。
     """
     payload = "|".join(str(v) for v in [
         note.get("title", ""),

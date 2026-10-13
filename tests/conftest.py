@@ -1,5 +1,6 @@
 """共享测试 fixtures。"""
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -9,14 +10,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import xhs_config
 import xhs_storage
+import database
+from psycopg2 import sql
 
 
 @pytest.fixture
-def db_conn():
-    """创建内存 SQLite 数据库并应用 schema。"""
-    conn = xhs_storage._create_in_memory()
-    yield conn
-    conn.close()
+def db_conn(monkeypatch):
+    """每例使用独立 PG schema，真实验证 SQL，不接触站点数据。"""
+    schema = "test_xhs_" + uuid.uuid4().hex
+    admin = database.connect()
+    admin.autocommit = True
+    admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    original_kwargs = database.postgres_kwargs
+
+    def test_kwargs(*, readonly=False):
+        return {**original_kwargs(readonly=readonly), "options": f"-c search_path={schema}"}
+
+    monkeypatch.setattr(database, "postgres_kwargs", test_kwargs)
+    conn = None
+    try:
+        conn = xhs_storage.connect()
+        yield conn
+    finally:
+        if conn is not None:
+            conn.close()
+        admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        admin.close()
 
 
 @pytest.fixture

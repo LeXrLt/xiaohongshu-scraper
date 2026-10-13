@@ -1,4 +1,4 @@
-"""End-to-end crawl test: fetch user + latest 4 notes, store in SQLite + PG."""
+"""End-to-end crawl test: fetch user + latest 4 notes, store directly in PostgreSQL."""
 import sys, json, os
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent / 'scripts'))
 
@@ -7,7 +7,7 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-import xhs_sign, xhs_config, xhs_accounts, xhs_storage, sqlite3, pg_sync
+import xhs_sign, xhs_config, xhs_accounts, xhs_storage
 from curl_cffi.requests import Session
 from xhs_api import _normalize_note, _normalize_user
 
@@ -102,10 +102,10 @@ for i, n in enumerate(notes):
         print(f'  [{i+1}] {note_id} EMPTY (deleted/private)')
         detailed_notes.append(n)
 
-# ── Step 4: Store in SQLite ──
+# ── Step 4: Store in PostgreSQL ──
 print()
-print('[Step 4/5] Storing in SQLite...')
-conn = sqlite3.connect(str(xhs_config.DB_PATH))
+print('[Step 4/5] Storing in PostgreSQL...')
+conn = xhs_storage.connect()
 basic['user_id'] = TEST_USER_ID
 user_norm = _normalize_user(basic)
 xhs_storage.upsert_user(conn, user_norm)
@@ -123,25 +123,14 @@ for n in detailed_notes:
 
 conn.commit()
 conn.close()
-print(f'  Total: {stored} notes stored in SQLite ({xhs_config.DB_PATH})')
-
-# ── Step 5: Sync to PostgreSQL ──
-print()
-print('[Step 5/5] Syncing SQLite -> PostgreSQL...')
-pg_conn = pg_sync.get_pg_connection()
-try:
-    pg_sync.init_schema(pg_conn)
-    count = pg_sync.sync_sqlite_to_pg(pg_conn)
-    print(f'  PG sync OK: {count} total rows synchronized')
-finally:
-    pg_conn.close()
+print(f'  Total: {stored} notes stored in PostgreSQL')
 
 # ── Verify in PG ──
 print()
 print('='*60)
 print('VERIFICATION: Querying configured PostgreSQL')
 print('='*60)
-vconn = pg_sync.get_pg_connection()
+vconn = xhs_storage.connect()
 vcur = vconn.cursor()
 vcur.execute(
     'SELECT note_id, title, type, liked_count, published_at FROM xhs_notes WHERE user_id=%s ORDER BY published_at DESC LIMIT 4',
@@ -161,6 +150,5 @@ print('='*60)
 print('END-TO-END PG CRAWL COMPLETE')
 print(f'User: {nickname} ({TEST_USER_ID})')
 print(f'Latest {stored} notes stored in:')
-print(f'  - SQLite: {xhs_config.DB_PATH}')
 print(f'  - PostgreSQL: {os.getenv("POSTGRES_DB", "xhs_reader")}.xhs_notes')
 print('='*60)

@@ -131,7 +131,7 @@ class TestFindNpm:
     def test_fallback_to_node_dir(self, tmp_path):
         node_exe = tmp_path / "node.exe"
         node_exe.write_text("")
-        npm_exe = tmp_path / "npm.cmd"
+        npm_exe = tmp_path / ("npm.cmd" if sys.platform == "win32" else "npm")
         npm_exe.write_text("")
 
         with patch("shutil.which", side_effect=[None, None]), \

@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
+import sys
+from pathlib import Path
 from dataclasses import asdict, dataclass
 from typing import Any
 
-import psycopg2
-from dotenv import load_dotenv
-
-# 本地从当前工作目录加载根目录 .env；容器通过 compose env_file 注入。
-load_dotenv()
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from database import connect as get_connection
 
 
 @dataclass
@@ -19,21 +17,6 @@ class ReaderConfig:
     keywords: list[str]
     bloggers: list[str]
     cookies: str
-
-
-def postgres_kwargs() -> dict[str, Any]:
-    """Build one connection configuration from environment variables."""
-    return {
-        "host": os.getenv("POSTGRES_HOST", "localhost"),
-        "port": int(os.getenv("POSTGRES_PORT", "5432")),
-        "user": os.getenv("POSTGRES_USER", "xhs_reader"),
-        "password": os.getenv("POSTGRES_PASSWORD", ""),
-        "dbname": os.getenv("POSTGRES_DB", "xhs_reader"),
-    }
-
-
-def get_connection():
-    return psycopg2.connect(**postgres_kwargs())
 
 
 def ensure_config_table(conn) -> None:

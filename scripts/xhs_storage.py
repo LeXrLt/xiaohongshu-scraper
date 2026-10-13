@@ -1,8 +1,4 @@
-"""SQLite + Markdown/CSV 渲染。
-
-MVP 用 4 张表：notes / users / search_cache / crawl_state。
-评论、图片、视频本地化延后到 P2。
-"""
+"""PostgreSQL 存储与 Markdown / CSV / JSON / XLSX 导出。"""
 
 from __future__ import annotations
 
@@ -10,15 +6,15 @@ import csv
 import json
 import os
 import re
-import sqlite3
 import sys
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from xhs_config import DB_PATH, MEDIA_DIR, OUTPUT_DIR, note_media_dir, sanitize_filename
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from database import Connection, connect as _connect
+from psycopg2.extras import DictRow
+from xhs_config import DATA_DIR, ROOT, MEDIA_DIR, OUTPUT_DIR, note_media_dir, sanitize_filename
 
 
 def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -36,472 +32,158 @@ def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
         raise
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS notes (
-    note_id TEXT PRIMARY KEY,
-    user_id TEXT,
-    title TEXT,
-    description TEXT,
-    type TEXT,
-    liked_count INTEGER DEFAULT 0,
-    collected_count INTEGER DEFAULT 0,
-    comment_count INTEGER DEFAULT 0,
-    share_count INTEGER DEFAULT 0,
-    ip_location TEXT,
-    topics TEXT,
-    published_at TEXT,
-    xsec_token TEXT DEFAULT '',
-    xsec_source TEXT DEFAULT '',
-    video_url TEXT DEFAULT '',
-    cover_url TEXT DEFAULT '',
-    video_duration INTEGER DEFAULT 0,
-    video_transcript TEXT DEFAULT '',
-    video_ocr_text TEXT DEFAULT '',
-    video_summary TEXT DEFAULT '',
-    image_ocr_text TEXT DEFAULT '',
-    image_summary TEXT DEFAULT '',
-    image_mermaid TEXT DEFAULT '',
-    raw_json TEXT,
-    crawled_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT PRIMARY KEY,
-    nickname TEXT,
-    avatar TEXT,
-    description TEXT,
-    fans_count INTEGER DEFAULT 0,
-    follow_count INTEGER DEFAULT 0,
-    notes_count INTEGER DEFAULT 0,
-    location TEXT,
-    raw_json TEXT,
-    crawled_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS search_cache (
-    keyword TEXT,
-    page INTEGER,
-    note_ids_json TEXT,
-    crawled_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (keyword, page)
-);
-
-CREATE TABLE IF NOT EXISTS crawl_state (
-    task_id TEXT PRIMARY KEY,
-    task_type TEXT,
-    target_id TEXT,
-    cursor TEXT,
-    status TEXT,
-    last_error TEXT,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS comments (
-    comment_id TEXT PRIMARY KEY,
-    note_id TEXT,
-    parent_id TEXT DEFAULT '',
-    user_id TEXT,
-    nickname TEXT,
-    content TEXT,
-    like_count INTEGER DEFAULT 0,
-    ip_location TEXT,
-    pictures_json TEXT DEFAULT '[]',
-    target_comment_id TEXT DEFAULT '',
-    created_at TEXT,
-    raw_json TEXT,
-    crawled_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id);
-CREATE INDEX IF NOT EXISTS idx_notes_crawled ON notes(crawled_at);
-CREATE INDEX IF NOT EXISTS idx_comments_note ON comments(note_id);
-CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id);
-
--- 商户索引：商户本身不保存门店地址，地点只作为笔记抽取证据的辅助字段。
-CREATE TABLE IF NOT EXISTS merchant_categories (
-    category_id TEXT PRIMARY KEY,
-    parent_id TEXT DEFAULT '',
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    aliases TEXT NOT NULL DEFAULT '[]',
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active',
-    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS merchant_tags (
-    tag_id TEXT PRIMARY KEY,
-    group_name TEXT NOT NULL DEFAULT '',
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'active',
-    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS merchants (
-    merchant_id TEXT PRIMARY KEY,
-    canonical_name TEXT NOT NULL,
-    aliases TEXT NOT NULL DEFAULT '[]',
-    city TEXT DEFAULT '',
-    district TEXT DEFAULT '',
-    cuisine TEXT NOT NULL DEFAULT '[]',
-    price_min INTEGER,
-    price_max INTEGER,
-    currency TEXT DEFAULT '',
-    price_basis TEXT DEFAULT 'unknown',
-    reservation_info TEXT DEFAULT '',
-    confidence REAL,
-    first_seen_at TEXT,
-    last_seen_at TEXT,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS merchant_category_links (
-    merchant_id TEXT NOT NULL,
-    category_id TEXT NOT NULL,
-    source_note_id TEXT NOT NULL DEFAULT '',
-    evidence_text TEXT NOT NULL DEFAULT '',
-    confidence REAL,
-    is_primary INTEGER NOT NULL DEFAULT 0,
-    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (merchant_id, category_id, source_note_id),
-    FOREIGN KEY (merchant_id) REFERENCES merchants(merchant_id),
-    FOREIGN KEY (category_id) REFERENCES merchant_categories(category_id)
-);
-
-CREATE TABLE IF NOT EXISTS merchant_tag_links (
-    merchant_id TEXT NOT NULL,
-    tag_id TEXT NOT NULL,
-    source_note_id TEXT NOT NULL DEFAULT '',
-    evidence_text TEXT NOT NULL DEFAULT '',
-    confidence REAL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (merchant_id, tag_id, source_note_id),
-    FOREIGN KEY (merchant_id) REFERENCES merchants(merchant_id),
-    FOREIGN KEY (tag_id) REFERENCES merchant_tags(tag_id)
-);
-
-CREATE TABLE IF NOT EXISTS merchant_notes (
-    merchant_id TEXT NOT NULL,
-    note_id TEXT NOT NULL,
-    relation_type TEXT NOT NULL,
-    evidence_text TEXT NOT NULL DEFAULT '',
-    evidence_start INTEGER,
-    evidence_end INTEGER,
-    confidence REAL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (merchant_id, note_id, relation_type),
-    FOREIGN KEY (merchant_id) REFERENCES merchants(merchant_id),
-    FOREIGN KEY (note_id) REFERENCES notes(note_id)
-);
-
-CREATE TABLE IF NOT EXISTS merchant_extraction_candidates (
-    candidate_id TEXT PRIMARY KEY,
-    note_id TEXT NOT NULL,
-    source_content_hash TEXT NOT NULL DEFAULT '',
-    candidate_name TEXT NOT NULL,
-    aliases_json TEXT NOT NULL DEFAULT '[]',
-    category_candidates_json TEXT NOT NULL DEFAULT '[]',
-    tag_candidates_json TEXT NOT NULL DEFAULT '[]',
-    city TEXT DEFAULT '',
-    district TEXT DEFAULT '',
-    price_json TEXT NOT NULL DEFAULT '{}',
-    reservation_info TEXT DEFAULT '',
-    relation_type TEXT NOT NULL DEFAULT 'mentioned',
-    evidence_text TEXT NOT NULL DEFAULT '',
-    confidence REAL,
-    model_name TEXT DEFAULT '',
-    prompt_version TEXT DEFAULT '',
-    extractor_version TEXT NOT NULL DEFAULT 'v1',
-    status TEXT NOT NULL DEFAULT 'pending',
-    error_message TEXT DEFAULT '',
-    raw_response TEXT DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (note_id, source_content_hash, extractor_version, candidate_name),
-    FOREIGN KEY (note_id) REFERENCES notes(note_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_merchants_name ON merchants(canonical_name);
-CREATE INDEX IF NOT EXISTS idx_merchants_city_district ON merchants(city, district);
-CREATE INDEX IF NOT EXISTS idx_merchant_categories_parent ON merchant_categories(parent_id);
-CREATE INDEX IF NOT EXISTS idx_merchant_category_links_category ON merchant_category_links(category_id);
-CREATE INDEX IF NOT EXISTS idx_merchant_tags_group ON merchant_tags(group_name);
-CREATE INDEX IF NOT EXISTS idx_merchant_tag_links_tag ON merchant_tag_links(tag_id);
-CREATE INDEX IF NOT EXISTS idx_merchant_notes_note ON merchant_notes(note_id);
-CREATE INDEX IF NOT EXISTS idx_merchant_candidates_note ON merchant_extraction_candidates(note_id);
-"""
+def connect() -> Connection:
+    return _connect(initialize=True)
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """迁移旧数据库结构，保留笔记、商户和来源关系。"""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
-    if "xsec_token" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN xsec_token TEXT DEFAULT ''")
-    if "xsec_source" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN xsec_source TEXT DEFAULT ''")
-    if "video_url" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN video_url TEXT DEFAULT ''")
-    if "cover_url" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN cover_url TEXT DEFAULT ''")
-    if "video_duration" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN video_duration INTEGER DEFAULT 0")
-    if "video_transcript" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN video_transcript TEXT DEFAULT ''")
-    if "video_ocr_text" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN video_ocr_text TEXT DEFAULT ''")
-    if "video_summary" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN video_summary TEXT DEFAULT ''")
-    if "image_ocr_text" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN image_ocr_text TEXT DEFAULT ''")
-    if "image_summary" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN image_summary TEXT DEFAULT ''")
-    if "image_mermaid" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN image_mermaid TEXT DEFAULT ''")
-    if "content_hash" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN content_hash TEXT DEFAULT ''")
-    # v2 对齐 PG schema 的增强列
-    if "content" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN content TEXT DEFAULT ''")
-    if "note_url" not in cols:
-        conn.execute("ALTER TABLE notes ADD COLUMN note_url TEXT DEFAULT ''")
-    candidate_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchant_extraction_candidates)").fetchall()}
-    if candidate_cols and "tag_candidates_json" not in candidate_cols:
-        conn.execute("ALTER TABLE merchant_extraction_candidates ADD COLUMN tag_candidates_json TEXT NOT NULL DEFAULT '[]'")
-    merchant_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchants)").fetchall()}
-    if "status" in merchant_cols:
-        conn.execute("ALTER TABLE merchants DROP COLUMN status")
-    conn.commit()
+def _json_value(value: Any, default: Any) -> Any:
+    if isinstance(value, str):
+        return json.loads(value) if value else default
+    return default if value is None else value
 
 
-_schema_done = False
-_checkpoint_done = False
-_init_lock = threading.Lock()
-
-
-def db_retry(fn, *args, retries=3, delay=1.0, **kwargs):
-    """执行 DB 操作，遇到 'database is locked' 自动重试。"""
-    for i in range(retries):
-        try:
-            return fn(*args, **kwargs)
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and i < retries - 1:
-                time.sleep(delay * (i + 1))
-            else:
-                raise
-
-
-def connect() -> sqlite3.Connection:
-    global _checkpoint_done, _schema_done
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    # busy_timeout: 多进程/多线程并发写冲突时排队等 30 秒
-    conn.execute("PRAGMA busy_timeout = 30000")
-    # WAL 模式允许并发读 + 串行写；先查再设，避免重复执行
-    jm = conn.execute("PRAGMA journal_mode").fetchone()
-    if jm is None or jm[0] != "wal":
-        conn.execute("PRAGMA journal_mode=WAL")
-    # 一次性初始化（checkpoint + DDL）加锁，防止多线程重复执行
-    with _init_lock:
-        if not _checkpoint_done:
-            _checkpoint_done = True
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
-        if not _schema_done:
-            _schema_done = True
-            conn.executescript(SCHEMA)
-            _migrate(conn)
-    return conn
-
-
-def _create_in_memory() -> sqlite3.Connection:
-    """创建内存 SQLite 数据库（用于测试）。"""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    _migrate(conn)
-    return conn
-
-
-def upsert_note(conn: sqlite3.Connection, note: dict[str, Any]) -> None:
-    content_hash = note.get("content_hash", "")
-
-    # 注意：新增字段时必须同步更新下方 ON CONFLICT DO UPDATE SET 子句
-    cols = (
-        "note_id user_id title description type liked_count collected_count "
-        "comment_count share_count ip_location topics published_at "
-        "xsec_token xsec_source video_url cover_url video_duration "
-        "video_transcript video_ocr_text video_summary "
-        "image_ocr_text image_summary image_mermaid raw_json content_hash "
-        "content note_url"
-    ).split()
-    # content: 优先用 description，PG 同步时 pg_sync 会从 raw_json.desc 丰富
-    _content = note.get("description", "")
-    _note_url = f"https://www.xiaohongshu.com/explore/{note.get('note_id', '')}"
-    values = [
-        note.get("note_id"),
-        note.get("user_id"),
-        note.get("title", ""),
-        note.get("description", ""),
-        note.get("type", "note"),
-        int(note.get("liked_count", 0) or 0),
-        int(note.get("collected_count", 0) or 0),
-        int(note.get("comment_count", 0) or 0),
-        int(note.get("share_count", 0) or 0),
-        note.get("ip_location", ""),
-        json.dumps(note.get("topics", []), ensure_ascii=False),
-        note.get("published_at", ""),
-        note.get("xsec_token", ""),
-        note.get("xsec_source", ""),
-        note.get("video_url", ""),
-        note.get("cover_url", ""),
-        int(note.get("video_duration", 0) or 0),
-        note.get("video_transcript", ""),
-        note.get("video_ocr_text", ""),
-        note.get("video_summary", ""),
-        note.get("image_ocr_text", ""),
-        note.get("image_summary", ""),
-        note.get("image_mermaid", ""),
-        json.dumps(note.get("raw", {}), ensure_ascii=False),
-        content_hash,
-        _content,
-        _note_url,
-    ]
-    # 防御性检查：确保 cols 数量与 values 数量一致
-    assert len(cols) == len(values), f"upsert_note: cols({len(cols)}) != values({len(values)})"
-    placeholders = ",".join("?" * len(cols))
-    # 用 INSERT...ON CONFLICT，避免 INSERT OR REPLACE 把已有字段清成空
-    # 遇到 database is locked 自动重试
-    # 增量跳过：content_hash 相同时跳过更新（事务内判断，避免并发竞态）
-    _skip_clause = ""
-    if content_hash:
-        _skip_clause = (
-            f"CASE WHEN notes.content_hash = ? THEN notes.content_hash ELSE excluded.content_hash END, "
-            f"crawled_at=CASE WHEN notes.content_hash = ? THEN notes.crawled_at ELSE CURRENT_TIMESTAMP END"
+def upsert_note(conn: Connection, note: dict[str, Any]) -> None:
+    raw = _json_value(note.get("raw"), {})
+    data = {key: note.get(key, "") or "" for key in (
+        "note_id", "user_id", "title", "description", "type", "ip_location",
+        "published_at", "xsec_token", "xsec_source", "cover_url", "video_transcript",
+        "video_ocr_text", "video_summary", "image_ocr_text", "image_summary",
+        "image_mermaid", "content_hash",
+    )}
+    data.update({key: int(note.get(key, 0) or 0) for key in (
+        "liked_count", "collected_count", "comment_count", "share_count", "video_duration",
+    )})
+    data.update(
+        topics=json.dumps(_json_value(note.get("topics"), []), ensure_ascii=False),
+        raw_data=json.dumps(raw, ensure_ascii=False),
+        content=raw.get("desc") or note.get("content") or note.get("description") or "",
+        note_url=note.get("note_url") or f"https://www.xiaohongshu.com/explore/{note['note_id']}",
+        image_urls=json.dumps(_extract_images(raw), ensure_ascii=False),
+        video_url=note.get("video_url") or _extract_video_url(raw) or "",
+    )
+    preserved = {
+        "xsec_token", "xsec_source", "cover_url", "video_url", "video_transcript",
+        "video_ocr_text", "video_summary", "image_ocr_text", "image_summary",
+        "image_mermaid", "content", "note_url",
+    }
+    updates = []
+    for key in data:
+        if key == "note_id":
+            continue
+        value = f"EXCLUDED.{key}"
+        if key in preserved:
+            value = f"COALESCE(NULLIF({value}, ''), xhs_notes.{key})"
+        elif key == "video_duration":
+            value = "CASE WHEN EXCLUDED.video_duration > 0 THEN EXCLUDED.video_duration ELSE xhs_notes.video_duration END"
+        elif key == "raw_data":
+            value = "CASE WHEN length(EXCLUDED.raw_data::text) > length(COALESCE(xhs_notes.raw_data, '{}'::jsonb)::text) THEN EXCLUDED.raw_data ELSE xhs_notes.raw_data END"
+        elif key == "image_urls":
+            value = "CASE WHEN EXCLUDED.image_urls <> '[]'::jsonb THEN EXCLUDED.image_urls ELSE xhs_notes.image_urls END"
+        updates.append(f"{key}={value}")
+    updates.extend([
+        "crawled_at=CASE WHEN EXCLUDED.content_hash <> '' AND EXCLUDED.content_hash = xhs_notes.content_hash THEN xhs_notes.crawled_at ELSE CURRENT_TIMESTAMP END",
+        "updated_at=CURRENT_TIMESTAMP",
+    ])
+    with conn:
+        conn.execute(
+            f"INSERT INTO xhs_notes ({','.join(data)}) VALUES ({','.join(['%s'] * len(data))}) "
+            f"ON CONFLICT (note_id) DO UPDATE SET {','.join(updates)}",
+            list(data.values()),
         )
-        # 把 content_hash 值追加到 values 末尾供 CASE 参数使用
-        values_with_skip = values + [content_hash, content_hash]
-    else:
-        _skip_clause = "excluded.content_hash, crawled_at=CURRENT_TIMESTAMP"
-        values_with_skip = values
+        update_media_state(conn, note["note_id"])
 
-    # 去掉末尾的 content_hash=... 和 crawled_at=...，由 _skip_clause 控制
-    _update_set = (
-        f"user_id=excluded.user_id, title=excluded.title, description=excluded.description, "
-        f"type=excluded.type, liked_count=excluded.liked_count, collected_count=excluded.collected_count, "
-        f"comment_count=excluded.comment_count, share_count=excluded.share_count, "
-        f"ip_location=excluded.ip_location, topics=excluded.topics, published_at=excluded.published_at, "
-        f"xsec_token=CASE WHEN excluded.xsec_token != '' THEN excluded.xsec_token ELSE notes.xsec_token END, "
-        f"xsec_source=CASE WHEN excluded.xsec_source != '' THEN excluded.xsec_source ELSE notes.xsec_source END, "
-        f"video_url=CASE WHEN excluded.video_url != '' THEN excluded.video_url ELSE notes.video_url END, "
-        f"cover_url=CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE notes.cover_url END, "
-        f"video_duration=CASE WHEN excluded.video_duration > 0 THEN excluded.video_duration ELSE notes.video_duration END, "
-        f"video_transcript=CASE WHEN excluded.video_transcript != '' THEN excluded.video_transcript ELSE notes.video_transcript END, "
-        f"video_ocr_text=CASE WHEN excluded.video_ocr_text != '' THEN excluded.video_ocr_text ELSE notes.video_ocr_text END, "
-        f"video_summary=CASE WHEN excluded.video_summary != '' THEN excluded.video_summary ELSE notes.video_summary END, "
-        f"image_ocr_text=CASE WHEN excluded.image_ocr_text != '' THEN excluded.image_ocr_text ELSE notes.image_ocr_text END, "
-        f"image_summary=CASE WHEN excluded.image_summary != '' THEN excluded.image_summary ELSE notes.image_summary END, "
-        f"image_mermaid=CASE WHEN excluded.image_mermaid != '' THEN excluded.image_mermaid ELSE notes.image_mermaid END, "
-        f"raw_json=CASE WHEN excluded.raw_json IS NOT NULL AND excluded.raw_json != '' AND (notes.raw_json IS NULL OR notes.raw_json = '' OR length(excluded.raw_json) > length(notes.raw_json)) THEN excluded.raw_json ELSE notes.raw_json END, "
-        f"content=CASE WHEN excluded.content != '' THEN excluded.content ELSE notes.content END, "
-        f"note_url=CASE WHEN excluded.note_url != '' THEN excluded.note_url ELSE COALESCE(notes.note_url, '') END, "
-    )
 
-    db_retry(
-        conn.execute,
-        f"INSERT INTO notes ({','.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(note_id) DO UPDATE SET {_update_set} content_hash={_skip_clause}",
-        values_with_skip,
+def update_media_state(conn: Connection, note_id: str) -> None:
+    directory = _find_media_dir(note_id, conn)
+    has_media = directory.is_dir() and any(directory.iterdir())
+    media_path = ""
+    if has_media:
+        base = DATA_DIR if directory.is_relative_to(DATA_DIR) else ROOT
+        media_path = str(directory.relative_to(base)).replace("\\", "/")
+    conn.execute(
+        "UPDATE xhs_notes SET media_path=%s, has_local_media=%s WHERE note_id=%s",
+        (media_path, has_media, note_id),
     )
-    conn.commit()
 
 
 def update_video_analysis(
-    conn: sqlite3.Connection,
+    conn: Connection,
     note_id: str,
     transcript: str = "",
     ocr_text: str = "",
     summary: str = "",
 ) -> None:
     """更新视频分析结果（转录 / OCR / 摘要），并刷新 crawled_at，不影响其他字段。"""
-    conn.execute(
-        "UPDATE notes SET video_transcript=?, video_ocr_text=?, video_summary=?, "
-        "crawled_at=datetime('now') "
-        "WHERE note_id=?",
-        (transcript, ocr_text, summary, note_id),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            "UPDATE xhs_notes SET video_transcript=%s, video_ocr_text=%s, video_summary=%s, "
+            "crawled_at=CURRENT_TIMESTAMP "
+            "WHERE note_id=%s",
+            (transcript, ocr_text, summary, note_id),
+        )
 
 
 def update_image_analysis(
-    conn: sqlite3.Connection,
+    conn: Connection,
     note_id: str,
     ocr_text: str = "",
     summary: str = "",
     mermaid: str = "",
 ) -> None:
     """更新图片分析结果（OCR / AI 描述 / Mermaid），不影响其他字段。"""
-    conn.execute(
-        "UPDATE notes SET image_ocr_text=?, image_summary=?, image_mermaid=? "
-        "WHERE note_id=?",
-        (ocr_text, summary, mermaid, note_id),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            "UPDATE xhs_notes SET image_ocr_text=%s, image_summary=%s, image_mermaid=%s "
+            "WHERE note_id=%s",
+            (ocr_text, summary, mermaid, note_id),
+        )
 
 
-def upsert_user(conn: sqlite3.Connection, user: dict[str, Any]) -> None:
+def upsert_user(conn: Connection, user: dict[str, Any]) -> None:
     user_id = user.get("user_id")
     if not user_id:
         return
-    conn.execute(
-        """INSERT INTO users (user_id, nickname, avatar, description,
-                              fans_count, follow_count, notes_count, location, raw_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(user_id) DO UPDATE SET
-               nickname = COALESCE(NULLIF(excluded.nickname, ''), users.nickname),
-               avatar = COALESCE(NULLIF(excluded.avatar, ''), users.avatar),
-               description = COALESCE(NULLIF(excluded.description, ''), users.description),
-               fans_count = CASE WHEN excluded.fans_count > 0 THEN excluded.fans_count ELSE users.fans_count END,
-               follow_count = CASE WHEN excluded.follow_count > 0 THEN excluded.follow_count ELSE users.follow_count END,
-               notes_count = CASE WHEN excluded.notes_count > 0 THEN excluded.notes_count ELSE users.notes_count END,
-               location = COALESCE(NULLIF(excluded.location, ''), users.location),
-               raw_json = CASE WHEN excluded.raw_json IS NOT NULL AND excluded.raw_json != '' AND (users.raw_json IS NULL OR users.raw_json = '' OR length(excluded.raw_json) > length(users.raw_json)) THEN excluded.raw_json ELSE users.raw_json END
-        """,
-        (
-            user_id,
-            user.get("nickname", ""),
-            user.get("avatar", ""),
-            user.get("description", ""),
-            int(user.get("fans_count", 0) or 0),
-            int(user.get("follow_count", 0) or 0),
-            int(user.get("notes_count", 0) or 0),
-            user.get("location", ""),
-            json.dumps(user.get("raw", {}), ensure_ascii=False),
-        ),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            """INSERT INTO xhs_users (user_id, nickname, avatar, description,
+                                  fans_count, follow_count, notes_count, location, raw_data)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   nickname = COALESCE(NULLIF(excluded.nickname, ''), xhs_users.nickname),
+                   avatar = COALESCE(NULLIF(excluded.avatar, ''), xhs_users.avatar),
+                   description = COALESCE(NULLIF(excluded.description, ''), xhs_users.description),
+                   fans_count = CASE WHEN excluded.fans_count > 0 THEN excluded.fans_count ELSE xhs_users.fans_count END,
+                   follow_count = CASE WHEN excluded.follow_count > 0 THEN excluded.follow_count ELSE xhs_users.follow_count END,
+                   notes_count = CASE WHEN excluded.notes_count > 0 THEN excluded.notes_count ELSE xhs_users.notes_count END,
+                   location = COALESCE(NULLIF(excluded.location, ''), xhs_users.location),
+                   raw_data = CASE WHEN length(excluded.raw_data::text) > length(COALESCE(xhs_users.raw_data, '{}'::jsonb)::text) THEN excluded.raw_data ELSE xhs_users.raw_data END
+            """,
+            (
+                user_id,
+                user.get("nickname", ""),
+                user.get("avatar", ""),
+                user.get("description", ""),
+                int(user.get("fans_count", 0) or 0),
+                int(user.get("follow_count", 0) or 0),
+                int(user.get("notes_count", 0) or 0),
+                user.get("location", ""),
+                json.dumps(user.get("raw", {}), ensure_ascii=False),
+            ),
+        )
 
 
 def save_search_page(
-    conn: sqlite3.Connection, keyword: str, page: int, note_ids: list[str]
+    conn: Connection, keyword: str, page: int, note_ids: list[str]
 ) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO search_cache (keyword, page, note_ids_json) VALUES (?, ?, ?)",
-        (keyword, page, json.dumps(note_ids, ensure_ascii=False)),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            "INSERT INTO xhs_search_cache (keyword, page, note_ids) VALUES (%s, %s, %s) ON CONFLICT (keyword, page) DO UPDATE SET note_ids=EXCLUDED.note_ids, crawled_at=CURRENT_TIMESTAMP",
+            (keyword, page, json.dumps(note_ids, ensure_ascii=False)),
+        )
 
 
 def update_crawl_state(
-    conn: sqlite3.Connection,
+    conn: Connection,
     task_id: str,
     task_type: str,
     target_id: str,
@@ -509,54 +191,55 @@ def update_crawl_state(
     status: str,
     last_error: str = "",
 ) -> None:
-    conn.execute(
-        """INSERT OR REPLACE INTO crawl_state
-           (task_id, task_type, target_id, cursor, status, last_error, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (task_id, task_type, target_id, cursor, status, last_error,
-         datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            """INSERT INTO xhs_crawl_state
+               (task_id, task_type, target_id, cursor, status, last_error, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (task_id) DO UPDATE SET task_type=EXCLUDED.task_type, target_id=EXCLUDED.target_id, cursor=EXCLUDED.cursor, status=EXCLUDED.status, last_error=EXCLUDED.last_error, updated_at=EXCLUDED.updated_at""",
+            (task_id, task_type, target_id, cursor, status, last_error,
+             datetime.now(timezone.utc).isoformat()),
+        )
 
 
-def get_crawl_state(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
-    cur = conn.execute("SELECT * FROM crawl_state WHERE task_id = ?", (task_id,))
+def get_crawl_state(conn: Connection, task_id: str) -> DictRow | None:
+    cur = conn.execute("SELECT * FROM xhs_crawl_state WHERE task_id = %s", (task_id,))
     return cur.fetchone()
 
 
-def get_note(conn: sqlite3.Connection, note_id: str) -> sqlite3.Row | None:
-    cur = conn.execute("SELECT * FROM notes WHERE note_id = ?", (note_id,))
+def get_note(conn: Connection, note_id: str) -> DictRow | None:
+    cur = conn.execute("SELECT * FROM xhs_notes WHERE note_id = %s", (note_id,))
     return cur.fetchone()
 
 
-def list_pending_corrections(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+def list_pending_corrections(conn: Connection, limit: int = 50) -> list[DictRow]:
     """待纠错视频笔记：有转录、有 OCR 参照、尚未标记纠错（video_summary 为空）。"""
     return conn.execute(
-        "SELECT note_id, title, video_transcript, video_ocr_text FROM notes "
+        "SELECT note_id, title, video_transcript, video_ocr_text FROM xhs_notes "
         "WHERE type='video' AND length(video_transcript) > 100 "
         "AND video_ocr_text != '' AND video_ocr_text != '[]' "
         "AND (video_summary = '' OR video_summary IS NULL) "
-        "ORDER BY rowid DESC LIMIT ?",
+        "ORDER BY crawled_at DESC, note_id LIMIT %s",
         (limit,),
     ).fetchall()
 
 
-def get_user(conn: sqlite3.Connection, user_id: str) -> sqlite3.Row | None:
-    cur = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+def get_user(conn: Connection, user_id: str) -> DictRow | None:
+    cur = conn.execute("SELECT * FROM xhs_users WHERE user_id = %s", (user_id,))
     return cur.fetchone()
 
 
-def resolve_user_id(conn: sqlite3.Connection, name_or_id: str) -> str | None:
+def resolve_user_id(conn: Connection, name_or_id: str) -> str | None:
     """昵称 → user_id 查找。输入 user_id 则直接返回，输入昵称则查 DB。"""
     # 尝试作为 user_id 精确匹配
-    row = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (name_or_id,)).fetchone()
+    row = conn.execute("SELECT user_id FROM xhs_users WHERE user_id = %s", (name_or_id,)).fetchone()
     if row:
         return row["user_id"]
     # 按昵称查找（精确优先，然后模糊）
-    row = conn.execute("SELECT user_id FROM users WHERE nickname = ?", (name_or_id,)).fetchone()
+    row = conn.execute("SELECT user_id FROM xhs_users WHERE nickname = %s", (name_or_id,)).fetchone()
     if row:
         return row["user_id"]
-    row = conn.execute("SELECT user_id FROM users WHERE nickname LIKE ?", (f"%{name_or_id}%",)).fetchone()
+    row = conn.execute("SELECT user_id FROM xhs_users WHERE nickname LIKE %s", (f"%{name_or_id}%",)).fetchone()
     if row:
         return row["user_id"]
     return None
@@ -566,87 +249,87 @@ def resolve_user_id(conn: sqlite3.Connection, name_or_id: str) -> str | None:
 # Comments
 # ---------------------------------------------------------------------------
 
-def upsert_comment(conn: sqlite3.Connection, comment: dict[str, Any]) -> None:
+def upsert_comment(conn: Connection, comment: dict[str, Any]) -> None:
     comment_id = comment.get("comment_id")
     if not comment_id:
         return
-    conn.execute(
-        """INSERT INTO comments (comment_id, note_id, parent_id, user_id, nickname,
-                                 content, like_count, ip_location, pictures_json,
-                                 target_comment_id, created_at, raw_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(comment_id) DO UPDATE SET
-               content = excluded.content,
-               like_count = CASE WHEN excluded.like_count > 0 THEN excluded.like_count ELSE comments.like_count END,
-               ip_location = COALESCE(NULLIF(excluded.ip_location, ''), comments.ip_location),
-               pictures_json = excluded.pictures_json,
-               raw_json = CASE WHEN excluded.raw_json IS NOT NULL AND excluded.raw_json != '' AND (comments.raw_json IS NULL OR comments.raw_json = '' OR length(excluded.raw_json) > length(comments.raw_json)) THEN excluded.raw_json ELSE comments.raw_json END
-        """,
-        (
-            comment_id,
-            comment.get("note_id"),
-            comment.get("parent_id", ""),
-            comment.get("user_id", ""),
-            comment.get("nickname", ""),
-            comment.get("content", ""),
-            int(comment.get("like_count", 0) or 0),
-            comment.get("ip_location", ""),
-            json.dumps(comment.get("pictures", []), ensure_ascii=False),
-            comment.get("target_comment_id", ""),
-            comment.get("created_at", ""),
-            json.dumps(comment.get("raw", {}), ensure_ascii=False),
-        ),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            """INSERT INTO xhs_comments (comment_id, note_id, parent_id, user_id, nickname,
+                                     content, like_count, ip_location, pictures,
+                                     target_comment_id, created_at, raw_data)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT(comment_id) DO UPDATE SET
+                   content = excluded.content,
+                   like_count = CASE WHEN excluded.like_count > 0 THEN excluded.like_count ELSE xhs_comments.like_count END,
+                   ip_location = COALESCE(NULLIF(excluded.ip_location, ''), xhs_comments.ip_location),
+                   pictures = excluded.pictures,
+                   raw_data = CASE WHEN length(excluded.raw_data::text) > length(COALESCE(xhs_comments.raw_data, '{}'::jsonb)::text) THEN excluded.raw_data ELSE xhs_comments.raw_data END
+            """,
+            (
+                comment_id,
+                comment.get("note_id"),
+                comment.get("parent_id", ""),
+                comment.get("user_id", ""),
+                comment.get("nickname", ""),
+                comment.get("content", ""),
+                int(comment.get("like_count", 0) or 0),
+                comment.get("ip_location", ""),
+                json.dumps(_json_value(comment.get("pictures"), []), ensure_ascii=False),
+                comment.get("target_comment_id", ""),
+                comment.get("created_at", ""),
+                json.dumps(comment.get("raw", {}), ensure_ascii=False),
+            ),
+        )
 
 
-def iter_comments(conn: sqlite3.Connection, note_id: str) -> Iterable[sqlite3.Row]:
+def iter_comments(conn: Connection, note_id: str) -> Iterable[DictRow]:
     """主评论按 like_count desc，子评论挂在主评论下面（按 created_at asc）"""
     main = conn.execute(
-        "SELECT * FROM comments WHERE note_id = ? AND parent_id = '' "
+        "SELECT * FROM xhs_comments WHERE note_id = %s AND parent_id = '' "
         "ORDER BY like_count DESC, created_at ASC",
         (note_id,),
     ).fetchall()
     for m in main:
         yield m
         subs = conn.execute(
-            "SELECT * FROM comments WHERE note_id = ? AND parent_id = ? "
+            "SELECT * FROM xhs_comments WHERE note_id = %s AND parent_id = %s "
             "ORDER BY created_at ASC",
             (note_id, m["comment_id"]),
         ).fetchall()
         yield from subs
 
 
-def count_comments(conn: sqlite3.Connection, note_id: str) -> tuple[int, int]:
+def count_comments(conn: Connection, note_id: str) -> tuple[int, int]:
     """返回 (主评论数, 子评论数)"""
-    main = conn.execute("SELECT COUNT(*) FROM comments WHERE note_id = ? AND parent_id = ''", (note_id,)).fetchone()[0]
-    sub = conn.execute("SELECT COUNT(*) FROM comments WHERE note_id = ? AND parent_id != ''", (note_id,)).fetchone()[0]
+    main = conn.execute("SELECT COUNT(*) FROM xhs_comments WHERE note_id = %s AND parent_id = ''", (note_id,)).fetchone()[0]
+    sub = conn.execute("SELECT COUNT(*) FROM xhs_comments WHERE note_id = %s AND parent_id != ''", (note_id,)).fetchone()[0]
     return main, sub
 
 
 def iter_notes(
-    conn: sqlite3.Connection, user_id: str | None = None
+    conn: Connection, user_id: str | None = None
 ) -> Iterable[dict]:
     if user_id:
         cur = conn.execute(
-            "SELECT * FROM notes WHERE user_id = ? ORDER BY published_at DESC",
+            "SELECT * FROM xhs_notes WHERE user_id = %s ORDER BY published_at DESC",
             (user_id,),
         )
     else:
-        cur = conn.execute("SELECT * FROM notes ORDER BY published_at DESC")
+        cur = conn.execute("SELECT * FROM xhs_notes ORDER BY published_at DESC")
     for row in cur:
         yield dict(row)
 
 
-def _note_context(conn: sqlite3.Connection, note_id: str, md_path: Path | None = None) -> dict:
+def _note_context(conn: Connection, note_id: str, md_path: Path | None = None) -> dict:
     """提取渲染所需的公共数据，避免多个 _render_* 重复查库。"""
     note = get_note(conn, note_id)
     if not note:
         raise FileNotFoundError(f"note {note_id} not in DB")
     user = get_user(conn, note["user_id"]) if note["user_id"] else None
-    raw = json.loads(note["raw_json"] or "{}")
+    raw = (note["raw_data"] or {})
     nickname = (user["nickname"] if user else "") or raw.get("user", {}).get("nickname", "")
-    topics = json.loads(note["topics"] or "[]")
+    topics = (note["topics"] or [])
     topic_str = " ".join(f"#{t}" for t in topics) if topics else "—"
 
     # 计算从 MD 文件到 media 根目录的相对前缀
@@ -678,7 +361,7 @@ def _note_context(conn: sqlite3.Connection, note_id: str, md_path: Path | None =
     }
 
 
-def _render_index(conn: sqlite3.Connection, ctx: dict) -> str:
+def _render_index(conn: Connection, ctx: dict) -> str:
     """渲染 index.md：元数据 + 正文 + 图片 + 视频基本信息。"""
     note = ctx["note"]
     lines = [
@@ -834,7 +517,7 @@ def _render_images_section(ctx: dict) -> str | None:
     return "\n".join(lines)
 
 
-def _render_comments_section(conn: sqlite3.Connection, note_id: str) -> str | None:
+def _render_comments_section(conn: Connection, note_id: str) -> str | None:
     """渲染 comments.md：全部评论。无评论时返回 None。"""
     main_n, sub_n = count_comments(conn, note_id)
     if not main_n:
@@ -855,7 +538,7 @@ def _render_comments_section(conn: sqlite3.Connection, note_id: str) -> str | No
     return "\n".join(lines)
 
 
-def write_markdown_files(conn: sqlite3.Connection, note_id: str) -> list[Path]:
+def write_markdown_files(conn: Connection, note_id: str) -> list[Path]:
     """为单篇笔记生成子文件目录：index.md + video.md + images.md + comments.md。"""
     # 博主子目录
     note = get_note(conn, note_id)
@@ -930,13 +613,13 @@ def _render_video_ocr(ocr_text: str) -> str:
     return "\n".join(lines) if lines else ""
 
 
-def write_markdown(conn: sqlite3.Connection, note_id: str) -> Path:
+def write_markdown(conn: Connection, note_id: str) -> Path:
     """导出笔记为 MD 子文件目录，返回 index.md 路径。"""
     files = write_markdown_files(conn, note_id)
     return files[0]  # index.md
 
 
-def _human_filename(conn: sqlite3.Connection, note_id: str, ext: str) -> str:
+def _human_filename(conn: Connection, note_id: str, ext: str) -> str:
     """生成人类可读的文件名：{标题}_{note_id前8位}.ext
 
     无标题时退化到 {note_id}.ext。
@@ -957,7 +640,7 @@ def _human_filename(conn: sqlite3.Connection, note_id: str, ext: str) -> str:
     return f"{title}_{note_id[:8]}{ext}"
 
 
-def render_update_summary(conn: sqlite3.Connection, note_id: str) -> str:
+def render_update_summary(conn: Connection, note_id: str) -> str:
     """生成笔记当前状态摘要，用于更新通知。"""
     row = get_note(conn, note_id)
     if not row:
@@ -1018,7 +701,7 @@ CSV_HEADERS = [
 ]
 
 
-def write_csv(conn: sqlite3.Connection, path: Path | None = None, user_id: str | None = None) -> list[Path]:
+def write_csv(conn: Connection, path: Path | None = None, user_id: str | None = None) -> list[Path]:
     """导出 CSV。按博主分文件，放到 output/<博主名>/ 目录。返回生成的文件列表。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1046,7 +729,7 @@ def write_csv(conn: sqlite3.Connection, path: Path | None = None, user_id: str |
             writer.writerow(CSV_HEADERS)
             for i, note in enumerate(notes, 1):
                 note_user = get_user(conn, note["user_id"]) if note["user_id"] else None
-                topics = json.loads(note["topics"] or "[]")
+                topics = (note["topics"] or [])
                 desc = note["description"] or ""
 
                 # 媒体摘要
@@ -1086,17 +769,17 @@ def write_csv(conn: sqlite3.Connection, path: Path | None = None, user_id: str |
     return files
 
 
-def iter_notes_by_user(conn: sqlite3.Connection, user_id: str):
+def iter_notes_by_user(conn: Connection, user_id: str):
     """按 user_id 迭代笔记。"""
     cur = conn.execute(
-        "SELECT * FROM notes WHERE user_id = ? ORDER BY published_at DESC",
+        "SELECT * FROM xhs_notes WHERE user_id = %s ORDER BY published_at DESC",
         (user_id,),
     )
     for row in cur:
         yield dict(row)
 
 
-def write_json(conn: sqlite3.Connection, path: Path | None = None, user_id: str | None = None) -> Path:
+def write_json(conn: Connection, path: Path | None = None, user_id: str | None = None) -> Path:
     """导出笔记为 JSON 文件。user_id 过滤指定博主。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1113,14 +796,14 @@ def write_json(conn: sqlite3.Connection, path: Path | None = None, user_id: str 
     source = iter_notes_by_user(conn, user_id) if user_id else iter_notes(conn)
     for note in source:
         d = dict(note)
-        d["topics"] = json.loads(d.get("topics") or "[]")
-        d["raw_json"] = json.loads(d.get("raw_json") or "{}")
+        d["topics"] = d.get("topics") or []
+        d["raw_data"] = d.get("raw_data") or {}
         notes.append(d)
     _atomic_write(path, json.dumps(notes, ensure_ascii=False, indent=2, default=str))
     return path
 
 
-def write_xlsx(conn: sqlite3.Connection, path: Path | None = None, user_id: str | None = None) -> Path:
+def write_xlsx(conn: Connection, path: Path | None = None, user_id: str | None = None) -> Path:
     """导出笔记为 XLSX 文件（多 sheet）。user_id 过滤指定博主。需要 openpyxl。"""
     try:
         import openpyxl  # type: ignore
@@ -1154,13 +837,13 @@ def write_xlsx(conn: sqlite3.Connection, path: Path | None = None, user_id: str 
     ]
     ws_notes.append(note_cols)
     for note in (iter_notes_by_user(conn, user_id) if user_id else iter_notes(conn)):
-        ws_notes.append([note.get(c, "") for c in note_cols])
+        ws_notes.append([value.isoformat() if isinstance(value, datetime) else value for value in (note.get(c, "") for c in note_cols)])
 
     # Sheet 2: Users
     ws_users = wb.create_sheet("Users")
     user_cols = ["user_id", "nickname", "avatar", "fans_count", "notes_count", "desc"]
     ws_users.append(user_cols)
-    for row in conn.execute("SELECT * FROM users ORDER BY fans_count DESC"):
+    for row in conn.execute("SELECT * FROM xhs_users ORDER BY fans_count DESC"):
         d = dict(row)
         ws_users.append([d.get(c, "") for c in user_cols])
 
@@ -1168,7 +851,7 @@ def write_xlsx(conn: sqlite3.Connection, path: Path | None = None, user_id: str 
     ws_comments = wb.create_sheet("Comments")
     comment_cols = ["comment_id", "note_id", "content", "nickname", "like_count", "created_at"]
     ws_comments.append(comment_cols)
-    for row in conn.execute("SELECT * FROM comments ORDER BY created_at DESC"):
+    for row in conn.execute("SELECT * FROM xhs_comments ORDER BY created_at DESC"):
         d = dict(row)
         ws_comments.append([d.get(c, "") for c in comment_cols])
 
@@ -1202,7 +885,7 @@ def _extract_video_url(raw: dict) -> str | None:
 
 
 def _extract_cover_url(raw: dict) -> str:
-    """从 raw_json 提取视频封面图 URL。"""
+    """从 raw_data 提取视频封面图 URL。"""
     video = raw.get("video") or {}
     # 尝试多种路径
     for path in [
@@ -1220,7 +903,7 @@ def _extract_cover_url(raw: dict) -> str:
 
 
 def _extract_video_duration(raw: dict) -> int:
-    """从 raw_json 提取视频时长（秒）。"""
+    """从 raw_data 提取视频时长（秒）。"""
     video = raw.get("video") or {}
     dur = video.get("duration")
     if dur:
@@ -1228,7 +911,7 @@ def _extract_video_duration(raw: dict) -> int:
     return 0
 
 
-def _find_media_dir(note_id: str, conn: sqlite3.Connection) -> Path:
+def _find_media_dir(note_id: str, conn: Connection) -> Path:
     """查找笔记的本地媒体目录（兼容新旧两种结构）。
 
     新结构: media/<博主名>/<笔记标题>/

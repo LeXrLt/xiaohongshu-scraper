@@ -193,7 +193,9 @@ class TestAnalyzeTopics:
         assert result["total"] == 0
 
     def test_empty_db(self):
-        conn = xhs_storage._create_in_memory()
+        conn = self.conn
+        conn.execute("DELETE FROM xhs_notes")
+        conn.commit()
         result = xhs_analyze.analyze_topics(conn)
         assert result["total"] == 0
         conn.close()

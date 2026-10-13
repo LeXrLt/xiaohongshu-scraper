@@ -9,15 +9,14 @@
 
 from __future__ import annotations
 
-import json
 import random
-import sqlite3
 import sys
 import time
 from pathlib import Path
 
 import xhs_config
 import xhs_storage
+from database import Connection
 
 # curl_cffi 可用性检测（同 xhs_fetcher）
 try:
@@ -35,13 +34,13 @@ def guess_ext(url: str, default: str = ".jpg") -> str:
     return default
 
 
-def _media_out_dir(note_id: str, conn: sqlite3.Connection) -> Path:
+def _media_out_dir(note_id: str, conn: Connection) -> Path:
     """计算媒体输出目录: media/<博主名>/<笔记标题>/。"""
     return xhs_config.note_media_dir(note_id, conn)
 
 
 def download_media(
-    note_id: str, conn: sqlite3.Connection, with_video: bool = True, overwrite: bool = False
+    note_id: str, conn: Connection, with_video: bool = True, overwrite: bool = False
 ) -> tuple[int, int, int, Path]:
     """下载某笔记的图片/视频。
     返回 (n_img, n_video, n_err, out_dir)。
@@ -50,7 +49,7 @@ def download_media(
     if not row:
         print(f"[WARN] 笔记 {note_id} 不在 DB，跳过下载", file=sys.stderr)
         return 0, 0, 1, xhs_config.MEDIA_DIR / note_id
-    raw = json.loads(row["raw_json"] or "{}")
+    raw = (row["raw_data"] or {})
     out = _media_out_dir(note_id, conn)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -127,8 +126,12 @@ def download_media(
                     n_err += 1
                     print(f"  [download] 视频下载失败: {e}", file=sys.stderr)
 
+    with conn:
+        xhs_storage.update_media_state(conn, note_id)
     return n_ok, n_video, n_err, out
-def auto_download_note(note: dict, conn: sqlite3.Connection) -> None:
+
+
+def auto_download_note(note: dict, conn: Connection) -> None:
     """抓取笔记后自动下载图片（轻量，仅图片，不打扰用户）。
 
     - 只下图片，不下视频（视频大，需要用户主动）
@@ -149,7 +152,7 @@ def auto_download_note(note: dict, conn: sqlite3.Connection) -> None:
         print(f"     [auto-download] {note_id}: {e}", file=sys.stderr)
 
 
-def find_video_local(note_id: str, conn: sqlite3.Connection) -> Path | None:
+def find_video_local(note_id: str, conn: Connection) -> Path | None:
     """查找笔记的本地视频文件路径（兼容新旧目录结构）。"""
     # 新路径: media/<博主>/<标题>/video.mp4
     out = _media_out_dir(note_id, conn)
@@ -163,7 +166,7 @@ def find_video_local(note_id: str, conn: sqlite3.Connection) -> Path | None:
     return None
 
 
-def _refresh_video_url(note_id: str, conn: sqlite3.Connection) -> None:
+def _refresh_video_url(note_id: str, conn: Connection) -> None:
     """当 video_url 为空时，提示用户需要先抓笔记详情。
 
     列表 API（user_posted / search）返回摘要数据，不含完整 video URL。
@@ -173,7 +176,7 @@ def _refresh_video_url(note_id: str, conn: sqlite3.Connection) -> None:
           f"python scripts/xhs.py note {note_id}", file=sys.stderr)
 
 
-def post_process_note(note: dict, conn: sqlite3.Connection, args) -> None:
+def post_process_note(note: dict, conn: Connection, args) -> None:
     """根据 --download / --analyze 标志对单条笔记做后处理。"""
     do_download = getattr(args, "download", False)
     do_analyze = getattr(args, "analyze", False)

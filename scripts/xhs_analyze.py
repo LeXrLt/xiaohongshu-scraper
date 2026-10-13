@@ -193,7 +193,7 @@ def analyze_topics(
     # 1. 话题标签统计
     tag_counter: Counter[str] = Counter()
     for n in notes:
-        topics = json.loads(n["topics"] or "[]")
+        topics = (n["topics"] or [])
         for t in topics:
             if t:
                 tag_counter[t] += 1
@@ -245,12 +245,12 @@ def analyze_topics(
 
 def _comments_by_keyword(conn, keyword: str) -> list:
     """通过 search_cache → note_ids → comments 路径找评论。"""
-    cur = conn.execute("SELECT note_ids_json FROM search_cache WHERE keyword = ?", (keyword,))
+    cur = conn.execute("SELECT note_ids FROM xhs_search_cache WHERE keyword = %s", (keyword,))
     rows = cur.fetchall()
     comments = []
     seen_notes: set[str] = set()
     for row in rows:
-        note_ids = json.loads(row["note_ids_json"] or "[]")
+        note_ids = (row["note_ids"] or [])
         for nid in note_ids:
             if nid in seen_notes:
                 continue
@@ -261,7 +261,7 @@ def _comments_by_keyword(conn, keyword: str) -> list:
 
 def _all_comments(conn) -> list:
     """全部评论（按 note_id 遍历）。"""
-    cur = conn.execute("SELECT DISTINCT note_id FROM comments")
+    cur = conn.execute("SELECT DISTINCT note_id FROM xhs_comments")
     note_ids = [r["note_id"] for r in cur.fetchall()]
     comments = []
     for nid in note_ids:

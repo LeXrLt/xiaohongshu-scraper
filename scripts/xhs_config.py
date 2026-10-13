@@ -259,7 +259,6 @@ DATA_DIR: Path = ROOT / "data"
 COOKIES_PATH: Path = DATA_DIR / "cookies.json"
 ACCOUNTS_DIR: Path = DATA_DIR / "accounts"
 ACCOUNTS_STATE: Path = DATA_DIR / "accounts_state.json"
-DB_PATH: Path = DATA_DIR / "xhs.db"
 OUTPUT_DIR: Path = DATA_DIR / "output"
 MEDIA_DIR: Path = DATA_DIR / "media"
 LOG_PATH: Path = DATA_DIR / "runs.jsonl"
@@ -291,23 +290,20 @@ def note_media_dir(note_id: str, conn=None) -> Path:
     查不到时 fallback 到 media/<note_id>/。
     """
     if conn is not None:
-        try:
-            row = conn.execute("SELECT n.title, n.user_id, u.nickname "
-                               "FROM notes n LEFT JOIN users u ON n.user_id = u.user_id "
-                               "WHERE n.note_id = ?", (note_id,)).fetchone()
-            if row:
-                title = row[0] or ""
-                nickname = row[2] or ""
-                user_id = row[1] or ""
-                if title:
-                    safe_title = sanitize_filename(title, 60)
-                    if nickname:
-                        safe_author = sanitize_filename(nickname, 30)
-                        return MEDIA_DIR / safe_author / safe_title
-                    elif user_id:
-                        return MEDIA_DIR / user_id / safe_title
-        except Exception:
-            pass
+        row = conn.execute("SELECT n.title, n.user_id, u.nickname "
+                           "FROM xhs_notes n LEFT JOIN xhs_users u ON n.user_id = u.user_id "
+                           "WHERE n.note_id = %s", (note_id,)).fetchone()
+        if row:
+            title = row[0] or ""
+            nickname = row[2] or ""
+            user_id = row[1] or ""
+            if title:
+                safe_title = sanitize_filename(title, 60)
+                if nickname:
+                    safe_author = sanitize_filename(nickname, 30)
+                    return MEDIA_DIR / safe_author / safe_title
+                elif user_id:
+                    return MEDIA_DIR / user_id / safe_title
     return MEDIA_DIR / note_id
 
 # ---------------------------------------------------------------------------

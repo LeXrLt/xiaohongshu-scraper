@@ -12,7 +12,6 @@
     python query_db.py stats
 """
 
-import os
 import sys
 import json
 import argparse
@@ -25,32 +24,16 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-import psycopg2
 import psycopg2.extras
-from dotenv import load_dotenv
+from pathlib import Path
 
-
-# Load environment variables from .env (search upward)
-_env_dir = os.path.dirname(__file__)
-for _ in range(4):
-    _env_path = os.path.join(_env_dir, ".env")
-    if os.path.exists(_env_path):
-        load_dotenv(_env_path, encoding="utf-8")
-        break
-    _env_dir = os.path.dirname(_env_dir)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from database import connect
 
 
 def get_db_connection():
-    """Create a read-only database connection using .env config (readonly user)."""
-    conn = psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
-        port=int(os.getenv("POSTGRES_PORT", "5432")),
-        user=os.getenv("POSTGRES_READONLY_USER", "hub_readonly"),
-        password=os.getenv("POSTGRES_READONLY_PASSWORD", os.getenv("POSTGRES_PASSWORD", "")),
-        dbname=os.getenv("POSTGRES_DB", "xhs_reader"),
-    )
-    conn.set_session(readonly=True, autocommit=True)
-    return conn
+    """使用共用配置建立只读 PostgreSQL 会话。"""
+    return connect(readonly=True)
 
 
 # ---------------------------------------------------------------------------

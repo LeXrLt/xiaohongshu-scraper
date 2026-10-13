@@ -73,7 +73,7 @@ class TestImageAnalysisDB:
 
     def test_schema_migration_has_image_columns(self, db_conn):
         """新数据库应包含三个图片分析列。"""
-        cols = {r[1] for r in db_conn.execute("PRAGMA table_info(notes)").fetchall()}
+        cols = {r[0] for r in db_conn.execute("SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'xhs_notes'")}
         assert "image_ocr_text" in cols
         assert "image_summary" in cols
         assert "image_mermaid" in cols

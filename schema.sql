@@ -1,14 +1,4 @@
--- 小红书数据表
--- 对应 xhs_storage.py 中的 SQLite 表结构
--- v2: 增加 image_urls / video_url 提取、content 正文 fallback、note_url
---
--- 【列名映射说明】
--- SQLite               → PG (本文件)          说明
--- raw_json (TEXT)      → raw_data (JSONB)     pg_sync._sqlite_json() 自动转换
--- pictures_json (TEXT) → pictures (JSONB)     同上
--- note_ids_json (TEXT) → note_ids (JSONB)     同上
--- content (TEXT)       → content (TEXT)       v2 新增，与 SQLite 统一
--- note_url (TEXT)      → note_url (TEXT)      v2 新增，与 SQLite 统一
+-- 爬虫与阅读器共用的 PostgreSQL 表结构；初始化与迁移均可重复执行。
 
 CREATE TABLE IF NOT EXISTS xhs_notes (
     note_id TEXT PRIMARY KEY,

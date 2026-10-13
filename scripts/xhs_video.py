@@ -629,7 +629,7 @@ def _msg(text: str) -> None:
 
 
 def extract_video_cover(raw: dict) -> str:
-    """从 raw_json 提取视频封面图 URL。"""
+    """从 原始 JSON 提取视频封面图 URL。"""
     video = raw.get("video") or {}
     # 尝试多种路径
     for path in [
@@ -647,7 +647,7 @@ def extract_video_cover(raw: dict) -> str:
 
 
 def extract_video_duration(raw: dict) -> int:
-    """从 raw_json 提取视频时长（秒）。"""
+    """从 原始 JSON 提取视频时长（秒）。"""
     video = raw.get("video") or {}
     # 优先用 video.duration（毫秒）
     dur = video.get("duration")
