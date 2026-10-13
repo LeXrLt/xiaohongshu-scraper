@@ -95,6 +95,8 @@ python scripts/merchant.py dedupe --backup data/merchant-dedupe-backup.json
 
 ```bash
 cp .env.example .env
+# 生成永久密钥，将输出填写到 .env 的 API_AUTH_KEY
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 docker compose up -d --build
 ```
 
@@ -104,6 +106,42 @@ docker compose up -d --build
 python -m uvicorn main:app --app-dir web/backend --reload --port 8000
 cd web/frontend && npm install && npm run dev
 ```
+
+### API 鉴权
+
+永久密钥统一配置在根目录 `.env` 的 `API_AUTH_KEY`，至少 32 字节，
+由管理员分发给可信调用者。未配置密钥或 token 有效期配置不合法时，后端拒绝启动。
+`API_TOKEN_TTL_SECONDS` 默认 `7200`（2 小时），必须为正整数。
+
+直接调用后端时，先用永久密钥换取临时 token：
+
+```bash
+curl -X POST http://localhost:8000/api/auth/token \
+  -H "X-API-Key: <.env 中的 API_AUTH_KEY>"
+# 返回 {"access_token":"...","token_type":"bearer","expires_in":7200}
+
+curl http://localhost:8000/api/notes \
+  -H "Authorization: Bearer <access_token>"
+```
+
+笔记、商户及设置的全部读写接口均需 Bearer token；永久密钥不能直接访问数据接口。
+token 过期、签名无效或缺失时返回 `401`。健康检查 `/api/health` 和接口文档
+`/docs` 保持公开，`/api/auth/token` 则校验 `X-API-Key`。
+
+前端自动读取同一份根目录 `.env` 中的密钥，按需换取、缓存和提前续期 token；
+并发请求共用一次换取请求，数据接口返回 `401` 后重新换取并重试一次，用户无需操作。
+token 仅保存在内存中，刷新页面后重新获取。
+本地前端从根目录加载 `.env`；Docker Compose 在构建时传入密钥。
+修改密钥后需重启后端并重新构建/重启前端，已签发的旧 token 随后失效：
+
+```bash
+docker compose up -d --build api frontend
+```
+
+**公网部署边界：** 当前按浏览器直接请求 API 的方式实现，密钥会编译进前端，
+任何能访问前端的人都能取得它并拥有数据及设置读写权限（包括 cookies）。
+这适用于仅允许可信用户访问的前端。前端若完全公开，需增加用户登录或网关访问控制，
+也可将密钥移到 Next.js 服务端代理并对代理入口鉴权。公网传输应使用 HTTPS。
 
 设置页保存的关键词、博主和 cookies 会写入 PostgreSQL 的 `reader_config` 表；可以从项目根目录执行：
 
@@ -137,8 +175,11 @@ python scripts/xhs.py crawl-config --max-pages 2
 启动 PostgreSQL 并配置 `.env` 后运行：
 
 ```bash
-pip install pytest
+pip install pytest httpx
 python -m pytest tests -q
+node --test tests/frontend-api.test.cjs
 ```
+
+前端鉴权测试需要先在 `web/frontend` 执行 `npm install`。
 
 数据库测试在独立的临时 schema 中运行，结束后自动清理，不修改站点数据。连接账号需要创建 schema 的权限。

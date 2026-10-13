@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import os
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor
+
+from auth import get_auth_settings, require_token, router as auth_router
 
 from reader_config import (
     ReaderConfig,
@@ -22,13 +24,21 @@ from reader_config import (
 
 load_dotenv()
 
-app = FastAPI(title="XHS Reader API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    get_auth_settings()  # Refuse to start with missing or invalid authentication config.
+    yield
+
+
+app = FastAPI(title="XHS Reader API", version="1.0.0", lifespan=lifespan)
+app.include_router(auth_router)
+data_router = APIRouter(dependencies=[Depends(require_token)])
 origins = [item.strip() for item in os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").split(",") if item.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "PUT", "OPTIONS"],
+    allow_methods=["GET", "PUT", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -53,8 +63,7 @@ def health() -> dict[str, str]:
     except Exception as exc:
         raise _db_error(exc) from exc
 
-# End of API routes.
-@app.get("/api/settings")
+@data_router.get("/api/settings")
 def get_settings() -> dict[str, Any]:
     try:
         with closing(get_connection()) as conn:
@@ -63,7 +72,7 @@ def get_settings() -> dict[str, Any]:
         raise _db_error(exc) from exc
 
 
-@app.put("/api/settings")
+@data_router.put("/api/settings")
 def update_settings(payload: SettingsPayload) -> dict[str, Any]:
     try:
         with closing(get_connection()) as conn:
@@ -73,7 +82,7 @@ def update_settings(payload: SettingsPayload) -> dict[str, Any]:
         raise _db_error(exc) from exc
 
 
-@app.get("/api/notes")
+@data_router.get("/api/notes")
 def list_notes(
     keyword: str | None = Query(default=None, max_length=120),
     blogger: str | None = Query(default=None, max_length=120),
@@ -124,7 +133,7 @@ def list_notes(
         raise _db_error(exc) from exc
 
 
-@app.get("/api/notes/{note_id}")
+@data_router.get("/api/notes/{note_id}")
 def get_note(note_id: str) -> dict[str, Any]:
     try:
         with closing(get_connection()) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -145,7 +154,7 @@ def get_note(note_id: str) -> dict[str, Any]:
         raise _db_error(exc) from exc
 
 
-@app.get("/api/merchants")
+@data_router.get("/api/merchants")
 def list_merchants(
     keyword: str | None = Query(default=None, max_length=120),
     city: str | None = Query(default=None, max_length=80),
@@ -216,7 +225,7 @@ def list_merchants(
         raise _db_error(exc) from exc
 
 
-@app.get("/api/merchants/{merchant_id}")
+@data_router.get("/api/merchants/{merchant_id}")
 def get_merchant(merchant_id: str) -> dict[str, Any]:
     """返回商户详情、分类和可追溯的来源笔记摘要。"""
     try:
@@ -280,3 +289,6 @@ def get_merchant(merchant_id: str) -> dict[str, Any]:
         raise
     except Exception as exc:
         raise _db_error(exc) from exc
+
+
+app.include_router(data_router)

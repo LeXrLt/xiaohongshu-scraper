@@ -1,5 +1,50 @@
 // 通过 Next.js 同源反代访问 Python API，避免浏览器跨域请求。
 const API_URL = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
+const API_KEY = process.env.NEXT_PUBLIC_API_AUTH_KEY || '';
+
+type AccessToken = { value: string; expiresAt: number };
+let cachedToken: AccessToken | undefined;
+let pendingToken: Promise<AccessToken> | undefined;
+
+async function getAccessToken(): Promise<AccessToken> {
+  if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken;
+  if (!pendingToken) {
+    pendingToken = (async () => {
+      if (!API_KEY) throw new Error('请在项目根目录 .env 中配置 API_AUTH_KEY 并重启/重新构建前端');
+      const startedAt = Date.now();
+      const response = await fetch(`${API_URL}/api/auth/token`, {
+        method: 'POST', headers: { 'X-API-Key': API_KEY }, cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json() as {
+        access_token: string; expires_in: number;
+      };
+      cachedToken = {
+        value: data.access_token,
+        // Refresh early; using request start time also accounts for network latency.
+        expiresAt: startedAt + Math.max(0, data.expires_in * 1000 - 30_000),
+      };
+      return cachedToken;
+    })().finally(() => { pendingToken = undefined; });
+  }
+  return pendingToken;
+}
+
+async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const send = (token: AccessToken) => {
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${token.value}`);
+    return fetch(`${API_URL}${path}`, { ...init, headers, cache: 'no-store' });
+  };
+  const token = await getAccessToken();
+  let response = await send(token);
+  if (response.status === 401) {
+    // A late 401 from an older request must not discard a newly refreshed token.
+    if (cachedToken === token) cachedToken = undefined;
+    response = await send(await getAccessToken());
+  }
+  return response;
+}
 
 export type Note = {
   note_id: string;
@@ -89,25 +134,25 @@ export async function getNotes(keyword = '', blogger = '', page = 1, pageSize = 
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   if (keyword.trim()) params.set('keyword', keyword.trim());
   if (blogger.trim()) params.set('blogger', blogger.trim());
-  const response = await fetch(`${API_URL}/api/notes?${params}`, { cache: 'no-store' });
+  const response = await apiFetch(`/api/notes?${params}`);
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<{ items: Note[]; total: number }>;
 }
 
 export async function getNote(noteId: string) {
-  const response = await fetch(`${API_URL}/api/notes/${encodeURIComponent(noteId)}`, { cache: 'no-store' });
+  const response = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}`);
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<Note>;
 }
 
 export async function getSettings() {
-  const response = await fetch(`${API_URL}/api/settings`, { cache: 'no-store' });
+  const response = await apiFetch('/api/settings');
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<Settings>;
 }
 
 export async function saveSettings(settings: Settings) {
-  const response = await fetch(`${API_URL}/api/settings`, {
+  const response = await apiFetch('/api/settings', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
   });
   if (!response.ok) throw new Error(await response.text());
@@ -121,13 +166,13 @@ export async function getMerchants(
   if (keyword.trim()) params.set('keyword', keyword.trim());
   if (city.trim()) params.set('city', city.trim());
   if (district.trim()) params.set('district', district.trim());
-  const response = await fetch(`${API_URL}/api/merchants?${params}`, { cache: 'no-store' });
+  const response = await apiFetch(`/api/merchants?${params}`);
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<{ items: Merchant[]; total: number; page: number; page_size: number }>;
 }
 
 export async function getMerchant(merchantId: string) {
-  const response = await fetch(`${API_URL}/api/merchants/${encodeURIComponent(merchantId)}`, { cache: 'no-store' });
+  const response = await apiFetch(`/api/merchants/${encodeURIComponent(merchantId)}`);
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<Merchant>;
 }

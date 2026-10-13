@@ -40,6 +40,7 @@ services:
       context: ./web/frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        API_AUTH_KEY: ${API_AUTH_KEY:?Set API_AUTH_KEY in .env}
         BACKEND_URL: http://api:8000
     container_name: xhs-reader-frontend
     restart: unless-stopped
