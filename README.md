@@ -151,6 +151,10 @@ python scripts/xhs.py crawl-config --max-pages 2
 
 ## 目录结构
 
+商户推荐 MCP 位于 [`merchants-mcp/`](merchants-mcp/README.md)，提供分类发现、标签检索、
+商户搜索和关联笔记读取。agent 按分类定位需求后筛选商户，再根据来源笔记生成推荐总结。
+支持 stdio 和 npm 命令入口，安装、配置及发布步骤见该目录说明。
+
 ```
 ├── scripts/xhs.py         # 爬虫 CLI
 ├── scripts/merchant.py    # 商户表初始化、Agent 抽取与候选校验
@@ -160,6 +164,7 @@ python scripts/xhs.py crawl-config --max-pages 2
 ├── schema.sql             # PostgreSQL 表结构
 ├── web/backend/           # FastAPI API
 ├── web/frontend/          # Next.js 阅读器
+├── merchants-mcp/        # npm MCP 包：商户推荐检索和来源笔记
 ├── assets/                # 签名脚本
 └── data/                  # 媒体、登录凭据、导出文件和运行日志
 ```

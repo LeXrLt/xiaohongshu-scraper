@@ -67,6 +67,7 @@ def test_missing_or_wrong_key_cannot_obtain_token(client, headers):
 @pytest.mark.parametrize("method,path", [
     ("GET", "/api/notes"), ("GET", "/api/notes/example"),
     ("GET", "/api/merchants"), ("GET", "/api/merchants/example"),
+    ("GET", "/api/merchant-categories"), ("GET", "/api/merchant-tags"),
     ("GET", "/api/settings"), ("PUT", "/api/settings"),
 ])
 @pytest.mark.parametrize("headers", [{}, {"X-API-Key": TEST_KEY},
