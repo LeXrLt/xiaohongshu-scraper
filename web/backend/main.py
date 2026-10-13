@@ -206,7 +206,7 @@ def list_merchants(
                 LEFT JOIN merchant_tags mt ON mt.tag_id = mtl.tag_id
                 {where}
                 GROUP BY m.merchant_id
-                ORDER BY m.updated_at DESC NULLS LAST, m.canonical_name ASC
+                ORDER BY m.updated_at DESC NULLS LAST, m.canonical_name ASC, m.merchant_id ASC
                 LIMIT %s OFFSET %s
                 """, [*params, page_size, offset],
             )

@@ -33,30 +33,77 @@ export default function MerchantsPage() {
   const [city, setCity] = useState('');
   const [district, setDistrict] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<Merchant | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
   const requestId = useRef(0);
   const detailRequestId = useRef(0);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const inFlight = useRef(false);
+  const activeFilters = useRef({ keyword: '', city: '', district: '' });
 
-  const load = useCallback(async (activeKeyword: string, activeCity: string, activeDistrict: string) => {
-    const id = ++requestId.current;
-    setLoading(true);
+  const loadPage = useCallback(async (pageToLoad: number, replace: boolean, filters: typeof activeFilters.current, id: number) => {
+    inFlight.current = true;
+    if (replace) setLoading(true); else setLoadingMore(true);
     setError('');
     try {
-      const result = await getMerchants(activeKeyword, activeCity, activeDistrict, 1, PAGE_SIZE);
+      const result = await getMerchants(filters.keyword, filters.city, filters.district, pageToLoad, PAGE_SIZE);
       if (id !== requestId.current) return;
-      setMerchants(result.items);
+      setMerchants((current) => {
+        const known = new Set(replace ? [] : current.map((merchant) => merchant.merchant_id));
+        const incoming = result.items.filter((merchant) => {
+          if (known.has(merchant.merchant_id)) return false;
+          known.add(merchant.merchant_id);
+          return true;
+        });
+        return replace ? incoming : [...current, ...incoming];
+      });
       setTotal(result.total);
+      setPage(pageToLoad);
+      setHasMore(pageToLoad * result.page_size < result.total && result.items.length > 0);
     } catch (err) {
       if (id === requestId.current) setError(err instanceof Error ? err.message : '读取商户失败');
     } finally {
-      if (id === requestId.current) setLoading(false);
+      if (id === requestId.current) {
+        inFlight.current = false;
+        setLoading(false);
+        setLoadingMore(false);
+      }
     }
   }, []);
 
+  const load = useCallback((activeKeyword: string, activeCity: string, activeDistrict: string) => {
+    const id = ++requestId.current;
+    const filters = { keyword: activeKeyword, city: activeCity, district: activeDistrict };
+    activeFilters.current = filters;
+    setMerchants([]);
+    setTotal(0);
+    setPage(0);
+    setHasMore(true);
+    setLoadingMore(false);
+    void loadPage(1, true, filters, id);
+  }, [loadPage]);
+
+  const loadNextPage = useCallback(() => {
+    if (inFlight.current || loading || loadingMore || !hasMore || page === 0) return;
+    void loadPage(page + 1, false, activeFilters.current, requestId.current);
+  }, [hasMore, loadPage, loading, loadingMore, page]);
+
   useEffect(() => { void load('', '', ''); }, [load]);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasMore || error || selected) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadNextPage();
+    }, { rootMargin: '500px 0px' });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [error, hasMore, loadNextPage, selected]);
 
   useEffect(() => {
     if (!selected) return;
@@ -112,7 +159,10 @@ export default function MerchantsPage() {
       </form>
       <div className="result-line"><span>{loading ? '正在读取…' : `共 ${total} 家商户`}</span>{error && <span className="error">{error}</span>}</div>
       {loading ? <div className="empty">正在加载商户…</div> : merchants.length === 0 ?
-        <div className="empty"><strong>还没有商户数据</strong><span>先运行商户抽取并完成候选合并。</span></div> :
+        <div className="empty"><strong>{error ? '商户加载失败' : '没有找到商户'}</strong>
+          {error ? <button className="merchant-retry" type="button" onClick={() => load(activeFilters.current.keyword, activeFilters.current.city, activeFilters.current.district)}>重新加载</button> :
+            <span>试试调整搜索条件，或稍后再来看看。</span>}</div> :
+        <>
         <section className="merchant-grid">
           {merchants.map((merchant) => {
             const categories = (merchant.categories || []).map((category) => category.name).filter(Boolean);
@@ -127,7 +177,13 @@ export default function MerchantsPage() {
               <div className="merchant-card-footer"><span>更新于 {formatDate(merchant.updated_at)}</span><span className="detail-hint">查看详情 ↗</span></div>
             </article>;
           })}
-        </section>}
+        </section>
+        <div ref={sentinelRef} className="load-more" role="status" aria-live="polite">
+          {loadingMore ? '正在加载更多商户…' : error ?
+            <button className="merchant-retry" type="button" onClick={loadNextPage}>加载失败，点击重试</button> :
+            hasMore ? '向下滚动，发现更多商户' : '已经看到全部商户'}
+        </div>
+        </>}
       {selected && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}>
         <article className="merchant-modal" role="dialog" aria-modal="true" aria-labelledby="merchant-modal-title">
           <button className="modal-close" type="button" aria-label="关闭" onClick={() => setSelected(null)}>×</button>
