@@ -189,11 +189,21 @@ def list_merchants(
                                'is_primary', mcl.is_primary
                            )) FILTER (WHERE mc.category_id IS NOT NULL),
                            '[]'::jsonb
-                       ) AS categories
+                       ) AS categories,
+                       COALESCE(
+                           jsonb_agg(DISTINCT jsonb_build_object(
+                               'tag_id', mt.tag_id,
+                               'name', mt.name,
+                               'group_name', mt.group_name
+                           )) FILTER (WHERE mt.tag_id IS NOT NULL),
+                           '[]'::jsonb
+                       ) AS tags
                 FROM merchants m
                 LEFT JOIN merchant_notes mn ON mn.merchant_id = m.merchant_id
                 LEFT JOIN merchant_category_links mcl ON mcl.merchant_id = m.merchant_id
                 LEFT JOIN merchant_categories mc ON mc.category_id = mcl.category_id
+                LEFT JOIN merchant_tag_links mtl ON mtl.merchant_id = m.merchant_id
+                LEFT JOIN merchant_tags mt ON mt.tag_id = mtl.tag_id
                 {where}
                 GROUP BY m.merchant_id
                 ORDER BY m.updated_at DESC NULLS LAST, m.canonical_name ASC
@@ -238,6 +248,18 @@ def get_merchant(merchant_id: str) -> dict[str, Any]:
 
             cur.execute(
                 """
+                SELECT mt.tag_id, mt.name, mt.group_name, mtl.evidence_text,
+                       mtl.confidence
+                FROM merchant_tag_links mtl
+                JOIN merchant_tags mt ON mt.tag_id = mtl.tag_id
+                WHERE mtl.merchant_id = %s
+                ORDER BY mt.group_name, mt.name
+                """, (merchant_id,),
+            )
+            tags = [dict(row) for row in cur.fetchall()]
+
+            cur.execute(
+                """
                 SELECT mn.note_id, mn.relation_type, mn.evidence_text, mn.confidence,
                        n.title, COALESCE(NULLIF(n.content, ''), n.description) AS content,
                        n.note_url, n.published_at, n.crawled_at
@@ -250,6 +272,7 @@ def get_merchant(merchant_id: str) -> dict[str, Any]:
             notes = [dict(row) for row in cur.fetchall()]
         result = dict(merchant)
         result["categories"] = categories
+        result["tags"] = tags
         result["notes"] = notes
         result["note_count"] = len(notes)
         return result

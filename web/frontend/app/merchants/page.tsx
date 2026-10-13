@@ -100,8 +100,8 @@ export default function MerchantsPage() {
   return (
     <>
       <section className="page-heading">
-        <div><p className="eyebrow">MERCHANT INDEX</p><h1>找到值得再去的店。</h1>
-          <p className="intro">从已抽取的笔记中整理出的商户索引。列表只展示摘要，点击卡片查看来源和证据。</p></div>
+        <div><p className="eyebrow">MERCHANT INDEX</p><h1>找到值得再次选择的商户。</h1>
+          <p className="intro">从已抽取的笔记中整理出的商户索引，覆盖餐饮、出行、医疗和休闲服务。列表只展示摘要，点击卡片查看来源和证据。</p></div>
         <Link className="secondary-button" href="/">回到笔记 →</Link>
       </section>
       <form className="searchbar merchant-search" onSubmit={submit}>
@@ -116,12 +116,13 @@ export default function MerchantsPage() {
         <section className="merchant-grid">
           {merchants.map((merchant) => {
             const categories = (merchant.categories || []).map((category) => category.name).filter(Boolean);
+            const tags = (merchant.tags || []).map((tag) => tag.name).filter(Boolean);
             const cuisine = listValue(merchant.cuisine);
             return <article className="merchant-card" key={merchant.merchant_id} role="button" tabIndex={0} onClick={() => openMerchant(merchant)} onKeyDown={(event) => handleKeyDown(event, merchant)}>
-              <div className="merchant-card-top"><span className="merchant-mark">店</span><span className={`merchant-status status-${merchant.status}`}>{merchant.status === 'active' ? '已确认' : '待核实'}</span></div>
+              <div className="merchant-card-top"><span className="merchant-mark">商</span><span className={`merchant-status status-${merchant.status}`}>{merchant.status === 'active' ? '已确认' : '待核实'}</span></div>
               <h2>{merchant.canonical_name || '未命名商户'}</h2>
               <p className="merchant-place">{[merchant.city, merchant.district].filter(Boolean).join(' · ') || '地点未知'}</p>
-              <div className="merchant-tags">{[...categories, ...cuisine].slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div>
+              <div className="merchant-tags">{[...categories, ...tags, ...cuisine].slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div>
               <div className="merchant-summary"><span>{formatPrice(merchant)}</span><span>{merchant.note_count || 0} 篇来源</span></div>
               <div className="merchant-card-footer"><span>更新于 {formatDate(merchant.updated_at)}</span><span className="detail-hint">查看详情 ↗</span></div>
             </article>;
@@ -138,6 +139,7 @@ export default function MerchantsPage() {
             {listValue(selected.cuisine).length > 0 && <div className="detail-section"><small>经营类型</small><p>{listValue(selected.cuisine).join('、')}</p></div>}
             {selected.reservation_info && <div className="detail-section"><small>预约信息</small><p>{selected.reservation_info}</p></div>}
             <div className="detail-section"><small>分类</small><div className="merchant-tags">{(selected.categories || []).length ? selected.categories?.map((category) => <span key={category.category_id}>{category.name}</span>) : <span>暂无分类</span>}</div></div>
+            <div className="detail-section"><small>标签</small><div className="merchant-tags">{(selected.tags || []).length ? selected.tags?.map((tag) => <span key={tag.tag_id}>{tag.name}</span>) : <span>暂无标签</span>}</div></div>
             <div className="detail-section"><small>来源笔记与证据</small>{(selected.notes || []).length ? <div className="merchant-notes">{selected.notes?.map((note) => <div className="merchant-note" key={`${note.note_id}-${note.relation_type}`}><div><strong>{note.title || '无标题笔记'}</strong><span>{note.relation_type}</span></div><p>{note.evidence_text || note.content?.slice(0, 140) || '暂无证据摘要'}</p><a href={note.note_url || `https://www.xiaohongshu.com/explore/${note.note_id}`} target="_blank" rel="noreferrer">打开原笔记 ↗</a></div>)}</div> : <p>暂无来源笔记</p>}</div>
           </div>}
         </article>

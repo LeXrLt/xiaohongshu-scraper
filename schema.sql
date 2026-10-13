@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS merchant_categories (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS merchant_tags (
+    tag_id TEXT PRIMARY KEY,
+    group_name TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS merchants (
     merchant_id TEXT PRIMARY KEY,
     canonical_name TEXT NOT NULL,
@@ -152,6 +163,16 @@ CREATE TABLE IF NOT EXISTS merchant_category_links (
     PRIMARY KEY (merchant_id, category_id, source_note_id)
 );
 
+CREATE TABLE IF NOT EXISTS merchant_tag_links (
+    merchant_id TEXT NOT NULL REFERENCES merchants(merchant_id),
+    tag_id TEXT NOT NULL REFERENCES merchant_tags(tag_id),
+    source_note_id TEXT NOT NULL DEFAULT '',
+    evidence_text TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (merchant_id, tag_id, source_note_id)
+);
+
 CREATE TABLE IF NOT EXISTS merchant_notes (
     merchant_id TEXT NOT NULL REFERENCES merchants(merchant_id),
     note_id TEXT NOT NULL REFERENCES xhs_notes(note_id),
@@ -171,6 +192,7 @@ CREATE TABLE IF NOT EXISTS merchant_extraction_candidates (
     candidate_name TEXT NOT NULL,
     aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
     category_candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
+    tag_candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
     city TEXT NOT NULL DEFAULT '',
     district TEXT NOT NULL DEFAULT '',
     price JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -189,10 +211,16 @@ CREATE TABLE IF NOT EXISTS merchant_extraction_candidates (
     UNIQUE (note_id, source_content_hash, extractor_version, candidate_name)
 );
 
+-- 兼容已存在的 PostgreSQL 商户候选表。
+ALTER TABLE merchant_extraction_candidates
+    ADD COLUMN IF NOT EXISTS tag_candidates JSONB NOT NULL DEFAULT '[]'::jsonb;
+
 CREATE INDEX IF NOT EXISTS idx_merchants_name ON merchants(canonical_name);
 CREATE INDEX IF NOT EXISTS idx_merchants_city_district ON merchants(city, district);
 CREATE INDEX IF NOT EXISTS idx_merchant_categories_parent ON merchant_categories(parent_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_category_links_category ON merchant_category_links(category_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_tags_group ON merchant_tags(group_name);
+CREATE INDEX IF NOT EXISTS idx_merchant_tag_links_tag ON merchant_tag_links(tag_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_notes_note ON merchant_notes(note_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_candidates_note ON merchant_extraction_candidates(note_id);
 

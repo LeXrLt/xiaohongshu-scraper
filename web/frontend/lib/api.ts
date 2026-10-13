@@ -43,6 +43,14 @@ export type MerchantCategory = {
   taxonomy_version?: string;
 };
 
+export type MerchantTag = {
+  tag_id: string;
+  name: string;
+  group_name?: string;
+  evidence_text?: string;
+  confidence?: number | null;
+};
+
 export type MerchantNote = {
   note_id: string;
   relation_type: string;
@@ -74,6 +82,7 @@ export type Merchant = {
   updated_at?: string | null;
   note_count?: number;
   categories?: MerchantCategory[];
+  tags?: MerchantTag[];
   notes?: MerchantNote[];
 };
 

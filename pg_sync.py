@@ -186,6 +186,10 @@ def _sqlite_has_table(conn, table_name: str) -> bool:
     return row is not None
 
 
+def _sqlite_has_column(conn, table_name: str, column_name: str) -> bool:
+    return any(row[1] == column_name for row in conn.execute(f"PRAGMA table_info({table_name})"))
+
+
 # ── SQLite → PG 同步 ──
 
 def sync_sqlite_to_pg(pg_conn):
@@ -353,6 +357,20 @@ def sync_sqlite_to_pg(pg_conn):
             }, ["merchant_id"])
             synced += 1
 
+    if _sqlite_has_table(sq, "merchant_tags"):
+        for row in sq.execute("SELECT * FROM merchant_tags"):
+            _pg_upsert(pg_conn, "merchant_tags", {
+                "tag_id": row["tag_id"],
+                "group_name": row["group_name"] or "",
+                "name": row["name"] or "",
+                "description": row["description"] or "",
+                "status": row["status"] or "active",
+                "taxonomy_version": row["taxonomy_version"] or "v1",
+                "created_at": row["created_at"] or now,
+                "updated_at": row["updated_at"] or now,
+            }, ["tag_id"])
+            synced += 1
+
     if _sqlite_has_table(sq, "merchant_category_links"):
         for row in sq.execute("SELECT * FROM merchant_category_links"):
             _pg_upsert(pg_conn, "merchant_category_links", {
@@ -381,7 +399,20 @@ def sync_sqlite_to_pg(pg_conn):
             }, ["merchant_id", "note_id", "relation_type"])
             synced += 1
 
+    if _sqlite_has_table(sq, "merchant_tag_links"):
+        for row in sq.execute("SELECT * FROM merchant_tag_links"):
+            _pg_upsert(pg_conn, "merchant_tag_links", {
+                "merchant_id": row["merchant_id"],
+                "tag_id": row["tag_id"],
+                "source_note_id": row["source_note_id"] or "",
+                "evidence_text": row["evidence_text"] or "",
+                "confidence": row["confidence"],
+                "created_at": row["created_at"] or now,
+            }, ["merchant_id", "tag_id", "source_note_id"])
+            synced += 1
+
     if _sqlite_has_table(sq, "merchant_extraction_candidates"):
+        has_tag_candidates = _sqlite_has_column(sq, "merchant_extraction_candidates", "tag_candidates_json")
         for row in sq.execute("SELECT * FROM merchant_extraction_candidates"):
             _pg_upsert(pg_conn, "merchant_extraction_candidates", {
                 "candidate_id": row["candidate_id"],
@@ -390,6 +421,7 @@ def sync_sqlite_to_pg(pg_conn):
                 "candidate_name": row["candidate_name"] or "",
                 "aliases": _sqlite_json(row["aliases_json"]),
                 "category_candidates": _sqlite_json(row["category_candidates_json"]),
+                "tag_candidates": _sqlite_json(row["tag_candidates_json"] if has_tag_candidates else "[]"),
                 "city": row["city"] or "",
                 "district": row["district"] or "",
                 "price": _sqlite_json(row["price_json"]),

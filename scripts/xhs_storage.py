@@ -131,6 +131,17 @@ CREATE TABLE IF NOT EXISTS merchant_categories (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS merchant_tags (
+    tag_id TEXT PRIMARY KEY,
+    group_name TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    taxonomy_version TEXT NOT NULL DEFAULT 'v1',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS merchants (
     merchant_id TEXT PRIMARY KEY,
     canonical_name TEXT NOT NULL,
@@ -164,6 +175,18 @@ CREATE TABLE IF NOT EXISTS merchant_category_links (
     FOREIGN KEY (category_id) REFERENCES merchant_categories(category_id)
 );
 
+CREATE TABLE IF NOT EXISTS merchant_tag_links (
+    merchant_id TEXT NOT NULL,
+    tag_id TEXT NOT NULL,
+    source_note_id TEXT NOT NULL DEFAULT '',
+    evidence_text TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (merchant_id, tag_id, source_note_id),
+    FOREIGN KEY (merchant_id) REFERENCES merchants(merchant_id),
+    FOREIGN KEY (tag_id) REFERENCES merchant_tags(tag_id)
+);
+
 CREATE TABLE IF NOT EXISTS merchant_notes (
     merchant_id TEXT NOT NULL,
     note_id TEXT NOT NULL,
@@ -185,6 +208,7 @@ CREATE TABLE IF NOT EXISTS merchant_extraction_candidates (
     candidate_name TEXT NOT NULL,
     aliases_json TEXT NOT NULL DEFAULT '[]',
     category_candidates_json TEXT NOT NULL DEFAULT '[]',
+    tag_candidates_json TEXT NOT NULL DEFAULT '[]',
     city TEXT DEFAULT '',
     district TEXT DEFAULT '',
     price_json TEXT NOT NULL DEFAULT '{}',
@@ -208,6 +232,8 @@ CREATE INDEX IF NOT EXISTS idx_merchants_name ON merchants(canonical_name);
 CREATE INDEX IF NOT EXISTS idx_merchants_city_district ON merchants(city, district);
 CREATE INDEX IF NOT EXISTS idx_merchant_categories_parent ON merchant_categories(parent_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_category_links_category ON merchant_category_links(category_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_tags_group ON merchant_tags(group_name);
+CREATE INDEX IF NOT EXISTS idx_merchant_tag_links_tag ON merchant_tag_links(tag_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_notes_note ON merchant_notes(note_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_candidates_note ON merchant_extraction_candidates(note_id);
 """
@@ -245,6 +271,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE notes ADD COLUMN content TEXT DEFAULT ''")
     if "note_url" not in cols:
         conn.execute("ALTER TABLE notes ADD COLUMN note_url TEXT DEFAULT ''")
+    candidate_cols = {r[1] for r in conn.execute("PRAGMA table_info(merchant_extraction_candidates)").fetchall()}
+    if candidate_cols and "tag_candidates_json" not in candidate_cols:
+        conn.execute("ALTER TABLE merchant_extraction_candidates ADD COLUMN tag_candidates_json TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
 
 

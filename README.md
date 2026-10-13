@@ -50,6 +50,8 @@ python scripts/merchant.py extract --limit 10
 python scripts/merchant.py promote
 ```
 
+`merchant.py init` 会初始化内置商户分类和标签字典。当前分类覆盖餐饮、文娱演出、交通出行、医疗健康、美容休闲和签证服务；标签按场景、环境、消费、预约、特色和便利分组。抽取提示词只允许 Agent 从这些字典中选择 `category_ids` 和 `tag_ids`，通过校验后分别写入商户分类关系和商户标签关系。
+
 ### 手动同步 PostgreSQL
 
 写入类命令结束时会自动同步。需要单独同步时运行：
@@ -87,6 +89,7 @@ python scripts/xhs.py crawl-config --max-pages 2
 ```
 ├── scripts/xhs.py         # 爬虫 CLI
 ├── scripts/merchant.py    # 商户表初始化、Agent 抽取与候选校验
+├── scripts/merchant_prompt.md # 商户 Agent 抽取提示词
 ├── scripts/xhs_storage.py # SQLite 存储与导出
 ├── pg_sync.py             # SQLite → PostgreSQL 同步
 ├── schema.sql             # PostgreSQL 表结构

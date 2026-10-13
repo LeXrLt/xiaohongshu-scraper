@@ -1,13 +1,13 @@
 # 商户索引与 MCP 查询开发文档
 
-> 文档状态：Phase 1 数据结构与候选抽取入口已实现，分类合并和 MCP 待后续阶段
+> 文档状态：Phase 1-3 商户数据结构、分类/标签字典、候选抽取和商户索引已实现，MCP 待后续阶段
 > 目标：从已经抓取的小红书笔记中提取商户信息、建立分类和商户索引，并通过 MCP 为 Agent 提供只读查询能力。
 > 数据源：现有 SQLite 笔记库，之后沿用 SQLite → PostgreSQL 同步链路。
-> 当前约束：本项目已有笔记、用户、评论和阅读器 API；商户表与候选抽取入口已建立，商户合并、查询 API 和 MCP Server 尚未完成。
+> 当前约束：本项目已有笔记、用户、评论、商户查询 API 和阅读器；MCP Server 尚未完成。
 
 本次先落地 SQLite / PostgreSQL 的商户数据结构，以及统一的
 `scripts/merchant.py` 入口。Agent 配置统一从 `.env` 读取，模型结果先进入
-`merchant_extraction_candidates`，通过证据校验后幂等写入商户和来源关系表。
+`merchant_extraction_candidates`，通过证据校验后幂等写入商户和来源关系表。分类和标签分别使用受控字典，商户与两者都是多对多关系。
 
 ## 1. 背景与目标
 
@@ -127,16 +127,26 @@
 ```text
 餐饮
 ├── 餐厅
-│   ├── 日料
-│   ├── Omakase
-│   ├── 粤菜
-│   ├── 火锅
-│   ├── 西餐
-│   └── 米其林
 ├── 咖啡店
 ├── 甜品店
 ├── 酒吧
-└── 茶饮店
+文娱演出
+├── 演唱会
+└── 演出活动
+交通出行
+├── 机票
+├── 用车
+└── 租车
+医疗健康
+├── 诊所
+├── 体检
+└── 抗衰
+美容休闲
+├── SPA
+├── 按摩
+└── 美容护理
+签证服务
+└── 签证代办
 ```
 
 “适合约会”“海景”“高性价比”等更适合作为标签或特征，不应和菜系分类混在同一层级。
@@ -183,7 +193,15 @@ taxonomy_version
 created_at
 ```
 
-### 4.4 `merchant_notes`
+### 4.4 `merchant_tags` 与 `merchant_tag_links`
+
+标签是独立于商户分类的特征字典，例如“适合约会”“海景餐厅”“可预约”。
+`merchant_tags` 保存标签名称、分组和版本；每个标签名称不超过 6 个字。
+`merchant_tag_links` 保存商户、标签、来源笔记、证据和置信度，因此一个商户可以有多个标签，一个标签也可以关联多个商户。
+
+抽取 Agent 只能从提示词中的 `available_tags` 选择 `tag_ids`。停用或不存在的标签会进入 `needs_review`，不会直接写入正式关系表。
+
+### 4.5 `merchant_notes`
 
 商户与笔记的多对多关系表。
 
@@ -207,7 +225,7 @@ created_at
 - `listicle`：清单或汇总文章中的商户。
 - `comparison`：与其他商户进行比较。
 
-### 4.5 `merchant_extraction_candidates`
+### 4.6 `merchant_extraction_candidates`
 
 模型输出的暂存表，不直接等同于正式商户。
 
@@ -220,6 +238,7 @@ source_content_hash
 candidate_name
 aliases_json
 category_candidates_json
+tag_candidates_json
 city
 district
 price_json
@@ -277,9 +296,10 @@ updated_at
 3. 价格、预约方式必须带正文证据；城市和区域只有在正文有证据时才写入。
 4. 没有证据的字段返回 `null` 或空数组。
 5. 不根据常识补全城市、菜系或营业信息。
-6. 话题只能作为候选分类依据，不能单独证明商户事实。
-7. 清单文章中的每个商户都标记为 `listicle`，不能默认是作者亲自体验。
-8. `confidence` 只表达抽取可信度，不表达商户质量。
+6. `category_ids` 只能选择可用分类，优先使用最具体的子分类；`tag_ids` 只能选择可用标签。
+7. 话题只能作为候选分类依据，不能单独证明商户事实。
+8. 清单文章中的每个商户都标记为 `listicle`，不能默认是作者亲自体验。
+9. `confidence` 只表达抽取可信度，不表达商户质量。
 
 校验器还应验证每个 `evidence` 是原始文本的子串，或经过明确的空白归一化后能够定位到原文。
 
@@ -495,14 +515,14 @@ Agent 不应把“笔记中提到过”直接表述为“商户当前真实情�
 
 ### Phase 3：商户规范化索引
 
-- 增加 `merchants`、`merchant_categories`、`merchant_category_links`、`merchant_notes`。
+- 增加 `merchants`、`merchant_categories`、`merchant_category_links`、`merchant_tags`、`merchant_tag_links`、`merchant_notes`。
 - 实现名称标准化和候选合并。
 - 增加分类版本和来源证据。
 - 更新 SQLite、PostgreSQL 和 `pg_sync.py`。
 
 ### Phase 4：只读 API 与 MCP
 
-- 增加商户分类和商户列表 API。
+- 增加商户分类、标签和商户列表 API。
 - 增加商户详情和关联笔记 API。
 - 实现 MCP stdio Server。
 - 过滤敏感字段。

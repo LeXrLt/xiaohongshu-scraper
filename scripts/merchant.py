@@ -20,6 +20,7 @@ PostgreSQL 表由根目录的 ``schema.sql`` 创建。所有 Agent 配置从项�
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -38,6 +39,7 @@ from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
+PROMPT_PATH = Path(__file__).with_name("merchant_prompt.md")
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -53,6 +55,7 @@ ALLOWED_FIELDS = {
     "name",
     "aliases",
     "category_ids",
+    "tag_ids",
     "city",
     "district",
     "price",
@@ -61,6 +64,58 @@ ALLOWED_FIELDS = {
     "evidence",
     "confidence",
 }
+
+# 业务分类是稳定的受控词表；标签表达场景/环境/消费等特征。
+DEFAULT_CATEGORIES = (
+    ("dining", "", "餐饮", "餐厅、咖啡、甜品和酒吧等餐饮商户", 10),
+    ("dining.restaurant", "dining", "餐厅", "正餐及特色餐饮", 11),
+    ("dining.cafe", "dining", "咖啡店", "咖啡、茶饮和轻食", 12),
+    ("dining.dessert", "dining", "甜品店", "甜品、烘焙和冰淇淋", 13),
+    ("dining.bar", "dining", "酒吧", "酒吧和夜间餐饮", 14),
+    ("entertainment", "", "文娱演出", "演唱会、演出和其他文娱活动", 20),
+    ("entertainment.concert", "entertainment", "演唱会", "演唱会及音乐现场", 21),
+    ("entertainment.event", "entertainment", "演出活动", "展览、演出和主题活动", 22),
+    ("transport", "", "交通出行", "机票、用车和租车服务", 30),
+    ("transport.flight", "transport", "机票", "航空机票及相关服务", 31),
+    ("transport.car", "transport", "用车", "接送机、包车和网约车服务", 32),
+    ("transport.rental", "transport", "租车", "汽车租赁服务", 33),
+    ("healthcare", "", "医疗健康", "诊所、体检和健康管理", 40),
+    ("healthcare.clinic", "healthcare", "诊所", "专科及综合诊所", 41),
+    ("healthcare.checkup", "healthcare", "体检", "体检和筛查服务", 42),
+    ("healthcare.anti_aging", "healthcare", "抗衰", "抗衰老和健康管理服务", 43),
+    ("wellness", "", "美容休闲", "SPA、按摩和美容护理", 50),
+    ("wellness.spa", "wellness", "SPA", "SPA及水疗服务", 51),
+    ("wellness.massage", "wellness", "按摩", "按摩及身体护理", 52),
+    ("wellness.beauty", "wellness", "美容护理", "美容及皮肤护理", 53),
+    ("visa", "", "签证服务", "签证、移民和出入境服务", 60),
+    ("visa.agency", "visa", "签证代办", "签证申请及代办服务", 61),
+)
+
+DEFAULT_TAGS = (
+    ("date_friendly", "场景", "适合约会"), ("group_dining", "场景", "适合聚餐"),
+    ("celebration", "场景", "适合庆祝"), ("business", "场景", "适合商务"),
+    ("solo_friendly", "场景", "适合独处"), ("family_friendly", "场景", "适合家庭"),
+    ("photo_friendly", "场景", "适合拍照"), ("group_friendly", "场景", "适合多人"),
+    ("sea_view", "环境", "海景餐厅"), ("city_night_view", "环境", "城市夜景"),
+    ("quiet", "环境", "氛围安静"), ("lively", "环境", "氛围热闹"),
+    ("terrace", "环境", "露台座位"), ("outdoor_seating", "环境", "户外座位"),
+    ("window_seat", "环境", "窗边座位"), ("private_room", "环境", "私密包间"),
+    ("fine_decor", "环境", "装修精致"), ("value", "消费", "高性价比"),
+    ("budget", "消费", "平价餐饮"), ("premium", "消费", "高端餐饮"),
+    ("under_100", "消费", "人均百元内"), ("under_300", "消费", "人均三百内"),
+    ("under_500", "消费", "人均五百内"), ("pricey", "消费", "价格偏高"),
+    ("large_portions", "消费", "分量充足"), ("reservable", "预约", "可预约"),
+    ("advance_booking", "预约", "需提前预约"), ("walk_in", "预约", "免预约"),
+    ("long_queue", "预约", "排队较久"), ("limited_seats", "预约", "位置紧张"),
+    ("michelin", "特色", "米其林"), ("bib_gourmand", "特色", "必比登"),
+    ("award_winning", "特色", "获奖餐厅"), ("signature_dish", "特色", "招牌菜"),
+    ("seasonal", "特色", "季节限定"), ("local_specialty", "特色", "本地特色"),
+    ("creative_cuisine", "特色", "创意菜式"), ("heritage_store", "特色", "传统老店"),
+    ("breakfast", "便利", "早餐供应"), ("lunch", "便利", "午餐供应"),
+    ("afternoon_tea", "便利", "下午茶"), ("late_night", "便利", "深夜营业"),
+    ("child_friendly", "便利", "儿童友好"), ("pet_friendly", "便利", "宠物友好"),
+    ("accessible", "便利", "无障碍"),
+)
 
 
 @dataclass(frozen=True)
@@ -162,6 +217,7 @@ def validate_candidate(
     candidate: dict[str, Any],
     source: str,
     valid_categories: set[str] | None = None,
+    valid_tags: set[str] | None = None,
 ) -> list[str]:
     """校验一个候选，并返回全部错误；模型不能通过此函数直接写正式表。"""
     errors: list[str] = []
@@ -192,6 +248,17 @@ def validate_candidate(
         invalid = {str(item) for item in category_ids} - valid_categories
         if invalid:
             errors.append(f"分类不存在或已停用: {', '.join(sorted(invalid))}")
+
+    raw_tag_ids = candidate.get("tag_ids", [])
+    tag_ids = raw_tag_ids if isinstance(raw_tag_ids, list) else []
+    if raw_tag_ids is not None and not isinstance(raw_tag_ids, list):
+        errors.append("tag_ids 必须是字符串数组")
+    if any(not isinstance(item, str) or not item.strip() for item in tag_ids):
+        errors.append("tag_ids 必须是字符串数组")
+    if valid_tags is not None:
+        invalid = {str(item) for item in tag_ids} - valid_tags
+        if invalid:
+            errors.append(f"标签不存在或已停用: {', '.join(sorted(invalid))}")
 
     relation_type = candidate.get("relation_type", "mentioned")
     if relation_type not in RELATION_TYPES:
@@ -264,7 +331,7 @@ def save_candidate(
     name = str(candidate.get("name", "")).strip()
     cid = candidate_id(note_id, content_hash, config.extractor_version, name)
     validation_errors = list(dict.fromkeys([
-        *validate_candidate(candidate, note_text(note), _active_categories(conn) or None),
+        *validate_candidate(candidate, note_text(note), _active_categories(conn) or None, _active_tags(conn) or None),
         *errors,
     ]))
     evidence = _as_list(candidate.get("evidence"))
@@ -273,14 +340,15 @@ def save_candidate(
     conn.execute(
         """INSERT INTO merchant_extraction_candidates (
             candidate_id, note_id, source_content_hash, candidate_name,
-            aliases_json, category_candidates_json, city, district, price_json,
+            aliases_json, category_candidates_json, tag_candidates_json, city, district, price_json,
             reservation_info, relation_type, evidence_text, confidence,
             model_name, prompt_version, extractor_version, status, error_message,
             raw_response, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(candidate_id) DO UPDATE SET
             aliases_json=excluded.aliases_json,
             category_candidates_json=excluded.category_candidates_json,
+            tag_candidates_json=excluded.tag_candidates_json,
             city=excluded.city,
             district=excluded.district,
             price_json=excluded.price_json,
@@ -301,6 +369,7 @@ def save_candidate(
             name,
             _json_text(candidate.get("aliases"), []),
             _json_text(candidate.get("category_ids"), []),
+            _json_text(candidate.get("tag_ids"), []),
             candidate.get("city", "") or "",
             candidate.get("district", "") or "",
             _json_text(price, {}),
@@ -329,6 +398,55 @@ def _active_categories(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _active_tags(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute("SELECT tag_id FROM merchant_tags WHERE status = 'active'")
+    }
+
+
+def _active_taxonomy_rows(conn: sqlite3.Connection) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    categories = [
+        {"id": row[0], "name": row[1], "parent_id": row[2] or ""}
+        for row in conn.execute(
+            """SELECT category_id, name, parent_id
+               FROM merchant_categories WHERE status = 'active'
+               ORDER BY sort_order, category_id"""
+        )
+    ]
+    tags = [
+        {"id": row[0], "name": row[1], "group": row[2] or ""}
+        for row in conn.execute(
+            """SELECT tag_id, name, group_name
+               FROM merchant_tags WHERE status = 'active'
+               ORDER BY group_name, name, tag_id"""
+        )
+    ]
+    return categories, tags
+
+
+def seed_taxonomy(conn: sqlite3.Connection) -> dict[str, int]:
+    """写入内置分类和标签字典；已有自定义记录不会被覆盖。"""
+    for category_id, parent_id, name, description, sort_order in DEFAULT_CATEGORIES:
+        conn.execute(
+            """INSERT INTO merchant_categories
+                (category_id, parent_id, name, description, sort_order, status, taxonomy_version)
+                VALUES (?, ?, ?, ?, ?, 'active', 'v1')
+                ON CONFLICT(category_id) DO NOTHING""",
+            (category_id, parent_id, name, description, sort_order),
+        )
+    for tag_id, group_name, name in DEFAULT_TAGS:
+        conn.execute(
+            """INSERT INTO merchant_tags
+                (tag_id, group_name, name, status, taxonomy_version)
+                VALUES (?, ?, ?, 'active', 'v1')
+                ON CONFLICT(tag_id) DO NOTHING""",
+            (tag_id, group_name, name),
+        )
+    conn.commit()
+    return {"categories": len(DEFAULT_CATEGORIES), "tags": len(DEFAULT_TAGS)}
+
+
 def _merchant_id(name: str) -> str:
     """由应用逻辑生成稳定 ID；模型不能自行生成正式 merchant_id。"""
     normalized = re.sub(r"\s+", " ", name).strip().casefold()
@@ -345,6 +463,7 @@ def _json_load(value: str | None, default: Any) -> Any:
 
 def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
     """将通过确定性校验的候选幂等写入正式商户索引。"""
+    seed_taxonomy(conn)
     rows = conn.execute(
         """
         SELECT c.*, n.published_at
@@ -356,15 +475,19 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
     ).fetchall()
     promoted = 0
     links = 0
+    tag_links = 0
     for row in rows:
         merchant_id = _merchant_id(row["candidate_name"])
         aliases = _json_load(row["aliases_json"], [])
         category_ids = _json_load(row["category_candidates_json"], [])
+        tag_ids = _json_load(row["tag_candidates_json"], [])
         price = _json_load(row["price_json"], {})
         if not isinstance(aliases, list):
             aliases = []
         if not isinstance(category_ids, list):
             category_ids = []
+        if not isinstance(tag_ids, list):
+            tag_ids = []
         if not isinstance(price, dict):
             price = {}
         price_min = price.get("min")
@@ -454,8 +577,33 @@ def promote_candidates(conn: sqlite3.Connection) -> dict[str, int]:
                 ),
             )
             links += 1
+        for tag_id in tag_ids:
+            if not isinstance(tag_id, str) or not tag_id.strip():
+                continue
+            tag_exists = conn.execute(
+                "SELECT 1 FROM merchant_tags WHERE tag_id = ? AND status = 'active'",
+                (tag_id,),
+            ).fetchone()
+            if not tag_exists:
+                continue
+            conn.execute(
+                """INSERT INTO merchant_tag_links (
+                    merchant_id, tag_id, source_note_id, evidence_text, confidence
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(merchant_id, tag_id, source_note_id) DO UPDATE SET
+                    evidence_text=excluded.evidence_text,
+                    confidence=excluded.confidence""",
+                (
+                    merchant_id,
+                    tag_id,
+                    row["note_id"],
+                    row["evidence_text"] or "",
+                    row["confidence"],
+                ),
+            )
+            tag_links += 1
     conn.commit()
-    return {"promoted": promoted, "category_links": links}
+    return {"promoted": promoted, "category_links": links, "tag_links": tag_links}
 
 
 def _load_notes(conn: sqlite3.Connection, note_id: str | None, limit: int) -> list[sqlite3.Row]:
@@ -470,25 +618,29 @@ def _load_notes(conn: sqlite3.Connection, note_id: str | None, limit: int) -> li
     return list(rows)
 
 
-def _prompt(note: sqlite3.Row) -> str:
+def _prompt(note: sqlite3.Row, categories: list[dict[str, str]], tags: list[dict[str, str]]) -> str:
     return json.dumps(
         {
             "note_id": note["note_id"],
             "title": note["title"] or "",
             "text": note_text(note),
+            "available_categories": categories,
+            "available_tags": tags,
         },
         ensure_ascii=False,
     )
 
 
-SYSTEM_PROMPT = """你是商户信息抽取器。只输出 JSON，不要 Markdown 或解释。
-格式为 {\"merchants\":[{\"name\":string,\"aliases\":[],\"category_ids\":[],
-\"city\":string|null,\"district\":string|null,\"price\":{\"min\":number|null,
-\"max\":number|null,\"currency\":string,\"basis\":\"per_person\"|\"set\"|\"unknown\"},
-\"reservation_info\":string|null,\"relation_type\":\"primary_review\"|\"mentioned\"|
-\"listicle\"|\"comparison\",\"evidence\":[],\"confidence\":number}]}。
-商户名称和所有 evidence 必须逐字来自输入文本。没有证据的字段使用 null 或空数组。
-不要输出 address 字段，也不要推断地址、营业状态或实时信息。"""
+@lru_cache(maxsize=1)
+def load_system_prompt() -> str:
+    """从独立 Markdown 文件读取提示词，避免修改脚本时误改抽取协议。"""
+    try:
+        prompt = PROMPT_PATH.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"读取商户提示词失败: {PROMPT_PATH}: {exc}") from exc
+    if not prompt:
+        raise RuntimeError(f"商户提示词为空: {PROMPT_PATH}")
+    return prompt
 
 
 def _decode_agent_content(payload: dict[str, Any]) -> dict[str, Any]:
@@ -507,7 +659,12 @@ def _decode_agent_content(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def call_agent(note: sqlite3.Row, config: MerchantAgentConfig) -> tuple[dict[str, Any], str]:
+def call_agent(
+    note: sqlite3.Row,
+    config: MerchantAgentConfig,
+    categories: list[dict[str, str]],
+    tags: list[dict[str, str]],
+) -> tuple[dict[str, Any], str]:
     if not config.api_key:
         raise RuntimeError("未配置 MERCHANT_AGENT_API_KEY（或 OPENAI_API_KEY）")
     if config.provider.lower() not in {"openai", "openai-compatible", "api"}:
@@ -519,8 +676,8 @@ def call_agent(note: sqlite3.Row, config: MerchantAgentConfig) -> tuple[dict[str
                 "model": config.model,
                 "temperature": 0,
                 "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": _prompt(note)},
+                    {"role": "system", "content": load_system_prompt()},
+                    {"role": "user", "content": _prompt(note, categories, tags)},
                 ],
                 "response_format": {"type": "json_object"},
             },
@@ -560,7 +717,10 @@ def call_agent(note: sqlite3.Row, config: MerchantAgentConfig) -> tuple[dict[str
 
 
 def extract_notes(conn: sqlite3.Connection, notes: list[sqlite3.Row], config: MerchantAgentConfig) -> dict[str, int]:
+    seed_taxonomy(conn)
     valid_categories = _active_categories(conn)
+    valid_tags = _active_tags(conn)
+    categories, tags = _active_taxonomy_rows(conn)
     stats = {"notes": 0, "accepted": 0, "needs_review": 0, "failed": 0}
     selected = notes[: config.max_notes]
     total = len(selected)
@@ -572,14 +732,14 @@ def extract_notes(conn: sqlite3.Connection, notes: list[sqlite3.Row], config: Me
             flush=True,
         )
         try:
-            result, raw = call_agent(note, config)
+            result, raw = call_agent(note, config, categories, tags)
             merchants = result.get("merchants", [])
             if not isinstance(merchants, list):
                 raise ValueError("merchants 必须是数组")
             for item in merchants:
                 if not isinstance(item, dict):
                     item = {"name": "", "evidence": []}
-                errors = validate_candidate(item, note_text(note), valid_categories or None)
+                errors = validate_candidate(item, note_text(note), valid_categories or None, valid_tags or None)
                 save_candidate(conn, note, item, config, errors, raw)
                 stats["needs_review" if errors else "accepted"] += 1
             print(
@@ -615,6 +775,7 @@ def _read_input(path: Path) -> dict[str, Any]:
 
 
 def import_candidates(conn: sqlite3.Connection, path: Path, config: MerchantAgentConfig) -> tuple[int, int, int]:
+    seed_taxonomy(conn)
     payload = _read_input(path)
     note_id = payload.get("note_id")
     if not note_id:
@@ -626,11 +787,12 @@ def import_candidates(conn: sqlite3.Connection, path: Path, config: MerchantAgen
     if not isinstance(merchants, list):
         raise ValueError("merchants 必须是数组")
     valid_categories = _active_categories(conn)
+    valid_tags = _active_tags(conn)
     valid = invalid = 0
     for candidate in merchants:
         if not isinstance(candidate, dict):
             candidate = {"name": "", "evidence": []}
-        errors = validate_candidate(candidate, note_text(note), valid_categories or None)
+        errors = validate_candidate(candidate, note_text(note), valid_categories or None, valid_tags or None)
         save_candidate(conn, note, candidate, config, errors, json.dumps(payload, ensure_ascii=False))
         if errors:
             invalid += 1
@@ -661,19 +823,22 @@ def main(argv: list[str] | None = None) -> int:
     conn = xhs_storage.connect()
     try:
         if args.command == "init":
-            print("SQLite 商户数据表已初始化")
+            taxonomy = seed_taxonomy(conn)
+            print(f"SQLite 商户数据表已初始化，已载入 {taxonomy['categories']} 个分类和 {taxonomy['tags']} 个标签")
             return 0
         if args.command in {"import", "validate"}:
             payload = _read_input(args.input)
             note = conn.execute("SELECT * FROM notes WHERE note_id = ?", (payload.get("note_id", ""),)).fetchone()
             if note is None:
                 raise ValueError(f"找不到笔记: {payload.get('note_id', '')}")
+            seed_taxonomy(conn)
             categories = _active_categories(conn) or None
+            tags = _active_tags(conn) or None
             errors = []
             for index, item in enumerate(payload.get("merchants", [])):
                 if not isinstance(item, dict):
                     item = {"name": "", "evidence": []}
-                item_errors = validate_candidate(item, note_text(note), categories)
+                item_errors = validate_candidate(item, note_text(note), categories, tags)
                 errors.extend(f"#{index + 1}: {message}" for message in item_errors)
             if args.command == "validate":
                 print(json.dumps({"valid": not errors, "errors": errors}, ensure_ascii=False, indent=2))
