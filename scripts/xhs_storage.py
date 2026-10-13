@@ -62,6 +62,7 @@ def upsert_note(conn: Connection, note: dict[str, Any]) -> None:
         video_url=note.get("video_url") or _extract_video_url(raw) or "",
     )
     preserved = {
+        "user_id", "title", "description", "type", "content_hash",
         "xsec_token", "xsec_source", "cover_url", "video_url", "video_transcript",
         "video_ocr_text", "video_summary", "image_ocr_text", "image_summary",
         "image_mermaid", "content", "note_url",
@@ -79,6 +80,8 @@ def upsert_note(conn: Connection, note: dict[str, Any]) -> None:
             value = "CASE WHEN length(EXCLUDED.raw_data::text) > length(COALESCE(xhs_notes.raw_data, '{}'::jsonb)::text) THEN EXCLUDED.raw_data ELSE xhs_notes.raw_data END"
         elif key == "image_urls":
             value = "CASE WHEN EXCLUDED.image_urls <> '[]'::jsonb THEN EXCLUDED.image_urls ELSE xhs_notes.image_urls END"
+        elif key == "topics":
+            value = "CASE WHEN EXCLUDED.topics <> '[]'::jsonb THEN EXCLUDED.topics ELSE xhs_notes.topics END"
         updates.append(f"{key}={value}")
     updates.extend([
         "crawled_at=CASE WHEN EXCLUDED.content_hash <> '' AND EXCLUDED.content_hash = xhs_notes.content_hash THEN xhs_notes.crawled_at ELSE CURRENT_TIMESTAMP END",
@@ -109,31 +112,37 @@ def update_media_state(conn: Connection, note_id: str) -> None:
 def update_video_analysis(
     conn: Connection,
     note_id: str,
-    transcript: str = "",
-    ocr_text: str = "",
-    summary: str = "",
+    transcript: str | None = None,
+    ocr_text: str | None = None,
+    summary: str | None = None,
 ) -> None:
-    """更新视频分析结果（转录 / OCR / 摘要），并刷新 crawled_at，不影响其他字段。"""
+    """增量保存分析；分步执行或失败时的空结果不清除已有成果。"""
     with conn:
         conn.execute(
-            "UPDATE xhs_notes SET video_transcript=%s, video_ocr_text=%s, video_summary=%s, "
-            "crawled_at=CURRENT_TIMESTAMP "
+            "UPDATE xhs_notes SET video_transcript=CASE "
+            "WHEN video_summary='agent纠错' AND COALESCE(%s, '') <> 'agent纠错' THEN video_transcript "
+            "ELSE COALESCE(NULLIF(%s, ''), video_transcript) END, "
+            "video_ocr_text=COALESCE(NULLIF(NULLIF(%s, ''), '[]'), video_ocr_text), "
+            "video_summary=CASE WHEN video_summary='agent纠错' THEN video_summary "
+            "ELSE COALESCE(NULLIF(%s, ''), video_summary) END, updated_at=CURRENT_TIMESTAMP "
             "WHERE note_id=%s",
-            (transcript, ocr_text, summary, note_id),
+            (summary, transcript, ocr_text, summary, note_id),
         )
 
 
 def update_image_analysis(
     conn: Connection,
     note_id: str,
-    ocr_text: str = "",
-    summary: str = "",
-    mermaid: str = "",
+    ocr_text: str | None = None,
+    summary: str | None = None,
+    mermaid: str | None = None,
 ) -> None:
     """更新图片分析结果（OCR / AI 描述 / Mermaid），不影响其他字段。"""
     with conn:
         conn.execute(
-            "UPDATE xhs_notes SET image_ocr_text=%s, image_summary=%s, image_mermaid=%s "
+            "UPDATE xhs_notes SET image_ocr_text=COALESCE(NULLIF(%s, ''), image_ocr_text), "
+            "image_summary=COALESCE(NULLIF(%s, ''), image_summary), "
+            "image_mermaid=COALESCE(NULLIF(%s, ''), image_mermaid) "
             "WHERE note_id=%s",
             (ocr_text, summary, mermaid, note_id),
         )

@@ -28,6 +28,7 @@ import re
 import sys
 import time
 import uuid
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -44,6 +45,8 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 load_dotenv(ROOT / ".env", encoding="utf-8")
 
 import xhs_storage  # noqa: E402  (需要先把 scripts 加到 sys.path)
+from database import Connection  # noqa: E402
+from psycopg2.extras import DictRow  # noqa: E402
 
 
 RELATION_TYPES = {"primary_review", "mentioned", "listicle", "comparison"}
@@ -300,7 +303,7 @@ def _json_text(value: Any, default: Any) -> str:
 
 
 def candidate_id(note_id: str, content_hash: str, extractor_version: str, name: str) -> str:
-    key = "\0".join((note_id, content_hash, extractor_version, name.strip().casefold()))
+    key = "\0".join((note_id, content_hash, extractor_version, normalize_name(name)))
     return uuid.uuid5(uuid.NAMESPACE_URL, "xiaohongshu-merchant:" + key).hex
 
 
@@ -311,6 +314,8 @@ def save_candidate(
     config: MerchantAgentConfig,
     errors: Iterable[str] = (),
     raw_response: str = "",
+    *,
+    commit: bool = True,
 ) -> str:
     """幂等保存候选；校验错误进入 needs_review 并保留错误原因。"""
     note_id = str(note["note_id"])
@@ -348,7 +353,22 @@ def save_candidate(
             status=excluded.status,
             error_message=excluded.error_message,
             raw_response=excluded.raw_response,
-            updated_at=CURRENT_TIMESTAMP""",
+            promoted_at=NULL,
+            updated_at=CURRENT_TIMESTAMP
+        WHERE merchant_extraction_candidates.status <> 'rejected'
+          AND (merchant_extraction_candidates.aliases,
+               merchant_extraction_candidates.category_candidates,
+               merchant_extraction_candidates.tag_candidates,
+               merchant_extraction_candidates.city, merchant_extraction_candidates.district,
+               merchant_extraction_candidates.price, merchant_extraction_candidates.reservation_info,
+               merchant_extraction_candidates.relation_type, merchant_extraction_candidates.evidence_text,
+               merchant_extraction_candidates.confidence, merchant_extraction_candidates.status,
+               merchant_extraction_candidates.error_message)
+          IS DISTINCT FROM
+              (excluded.aliases, excluded.category_candidates, excluded.tag_candidates,
+               excluded.city, excluded.district, excluded.price, excluded.reservation_info,
+               excluded.relation_type, excluded.evidence_text, excluded.confidence,
+               excluded.status, excluded.error_message)""",
         (
             cid,
             note_id,
@@ -372,7 +392,8 @@ def save_candidate(
             raw_response,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cid
 
 
@@ -434,167 +455,209 @@ def seed_taxonomy(conn: Connection) -> dict[str, int]:
     return {"categories": len(DEFAULT_CATEGORIES), "tags": len(DEFAULT_TAGS)}
 
 
+def normalize_name(name: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", name)).strip().casefold()
+
+
 def _merchant_id(name: str) -> str:
     """由应用逻辑生成稳定 ID；模型不能自行生成正式 merchant_id。"""
-    normalized = re.sub(r"\s+", " ", name).strip().casefold()
+    normalized = normalize_name(name)
     return uuid.uuid5(uuid.NAMESPACE_URL, "xiaohongshu-merchant:" + normalized).hex
 
 
 def promote_candidates(conn: Connection) -> dict[str, int]:
     """将通过确定性校验的候选幂等写入正式商户索引。"""
     seed_taxonomy(conn)
-    rows = conn.execute(
-        """
-        SELECT c.*, n.published_at
-        FROM merchant_extraction_candidates c
-        JOIN xhs_notes n ON n.note_id = c.note_id
-        WHERE c.status = 'accepted' AND TRIM(c.candidate_name) <> ''
-        ORDER BY c.updated_at, c.candidate_id
-        """
-    ).fetchall()
-    promoted = 0
-    links = 0
-    tag_links = 0
-    for row in rows:
-        merchant_id = _merchant_id(row["candidate_name"])
-        aliases = (row["aliases"] or [])
-        category_ids = (row["category_candidates"] or [])
-        tag_ids = (row["tag_candidates"] or [])
-        price = (row["price"] or {})
-        if not isinstance(aliases, list):
-            aliases = []
-        if not isinstance(category_ids, list):
-            category_ids = []
-        if not isinstance(tag_ids, list):
-            tag_ids = []
-        if not isinstance(price, dict):
-            price = {}
-        price_min = price.get("min")
-        price_max = price.get("max")
-        cuisine = [str(item) for item in category_ids if isinstance(item, str) and item.strip()]
-        conn.execute(
-            """INSERT INTO merchants (
-                merchant_id, canonical_name, aliases, city, district, cuisine,
-                price_min, price_max, currency, price_basis, reservation_info,
-                confidence, first_seen_at, last_seen_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT(merchant_id) DO UPDATE SET
-                canonical_name=excluded.canonical_name,
-                aliases=CASE WHEN excluded.aliases <> '[]' THEN excluded.aliases ELSE merchants.aliases END,
-                city=CASE WHEN excluded.city <> '' THEN excluded.city ELSE merchants.city END,
-                district=CASE WHEN excluded.district <> '' THEN excluded.district ELSE merchants.district END,
-                cuisine=CASE WHEN excluded.cuisine <> '[]' THEN excluded.cuisine ELSE merchants.cuisine END,
-                price_min=COALESCE(excluded.price_min, merchants.price_min),
-                price_max=COALESCE(excluded.price_max, merchants.price_max),
-                currency=CASE WHEN excluded.currency <> '' THEN excluded.currency ELSE merchants.currency END,
-                price_basis=CASE WHEN excluded.price_basis <> 'unknown' THEN excluded.price_basis ELSE merchants.price_basis END,
-                reservation_info=CASE WHEN excluded.reservation_info <> '' THEN excluded.reservation_info ELSE merchants.reservation_info END,
-                confidence=CASE WHEN excluded.confidence IS NOT NULL AND (merchants.confidence IS NULL OR excluded.confidence > merchants.confidence) THEN excluded.confidence ELSE merchants.confidence END,
-                first_seen_at=CASE WHEN merchants.first_seen_at IS NULL OR merchants.first_seen_at = '' THEN excluded.first_seen_at ELSE LEAST(merchants.first_seen_at, excluded.first_seen_at) END,
-                last_seen_at=CASE WHEN excluded.last_seen_at IS NULL OR excluded.last_seen_at = '' THEN merchants.last_seen_at ELSE GREATEST(COALESCE(merchants.last_seen_at, ''), excluded.last_seen_at) END,
-                updated_at=CURRENT_TIMESTAMP""",
-            (
-                merchant_id,
-                row["candidate_name"],
-                _json_text(aliases, []),
-                row["city"] or "",
-                row["district"] or "",
-                _json_text(cuisine, []),
-                price_min if isinstance(price_min, (int, float)) and not isinstance(price_min, bool) else None,
-                price_max if isinstance(price_max, (int, float)) and not isinstance(price_max, bool) else None,
-                str(price.get("currency", "") or ""),
-                str(price.get("basis", "unknown") or "unknown"),
-                row["reservation_info"] or "",
-                float(row["confidence"]) if row["confidence"] is not None else None,
-                row["published_at"] or "",
-                row["published_at"] or "",
-            ),
-        )
-        promoted += 1
-
-        conn.execute(
-            """INSERT INTO merchant_notes (
-                merchant_id, note_id, relation_type, evidence_text, confidence
-            ) VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT(merchant_id, note_id, relation_type) DO UPDATE SET
-                evidence_text=excluded.evidence_text,
-                confidence=excluded.confidence""",
-            (
-                merchant_id,
-                row["note_id"],
-                row["relation_type"] or "mentioned",
-                row["evidence_text"] or "",
-                row["confidence"],
-            ),
-        )
-
-        for category_id in category_ids:
-            if not isinstance(category_id, str) or not category_id.strip():
-                continue
-            category_exists = conn.execute(
-                "SELECT 1 FROM merchant_categories WHERE category_id = %s AND status = 'active'",
-                (category_id,),
-            ).fetchone()
-            if not category_exists:
-                continue
-            conn.execute(
-                """INSERT INTO merchant_category_links (
-                    merchant_id, category_id, source_note_id, evidence_text,
-                    confidence, is_primary, taxonomy_version
-                ) VALUES (%s, %s, %s, %s, %s, %s, 'v1')
-                ON CONFLICT(merchant_id, category_id, source_note_id) DO UPDATE SET
-                    evidence_text=excluded.evidence_text,
-                    confidence=excluded.confidence,
-                    is_primary=excluded.is_primary""",
-                (
-                    merchant_id,
-                    category_id,
-                    row["note_id"],
-                    row["evidence_text"] or "",
-                    row["confidence"],
-                    row["relation_type"] == "primary_review",
-                ),
-            )
-            links += 1
-        for tag_id in tag_ids:
-            if not isinstance(tag_id, str) or not tag_id.strip():
-                continue
-            tag_exists = conn.execute(
-                "SELECT 1 FROM merchant_tags WHERE tag_id = %s AND status = 'active'",
-                (tag_id,),
-            ).fetchone()
-            if not tag_exists:
-                continue
-            conn.execute(
-                """INSERT INTO merchant_tag_links (
-                    merchant_id, tag_id, source_note_id, evidence_text, confidence
-                ) VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT(merchant_id, tag_id, source_note_id) DO UPDATE SET
-                    evidence_text=excluded.evidence_text,
-                    confidence=excluded.confidence""",
-                (
-                    merchant_id,
-                    tag_id,
-                    row["note_id"],
-                    row["evidence_text"] or "",
-                    row["confidence"],
-                ),
-            )
-            tag_links += 1
-    conn.commit()
-    return {"promoted": promoted, "category_links": links, "tag_links": tag_links}
-
-
-def _load_notes(conn: Connection, note_id: str | None, limit: int) -> list[DictRow]:
-    if note_id:
-        rows = conn.execute("SELECT * FROM xhs_notes WHERE note_id = %s", (note_id,)).fetchall()
-    else:
+    with conn:
+        # 串行晋级，防止不同候选并发生成同一个商户的多个身份。
+        conn.execute("SELECT pg_advisory_xact_lock(734982107)")
+        existing = [dict(row) for row in conn.execute("SELECT merchant_id, canonical_name, aliases FROM merchants")]
         rows = conn.execute(
-            "SELECT * FROM xhs_notes WHERE COALESCE(content, description, title, '') <> '' "
-            "ORDER BY crawled_at DESC LIMIT %s",
-            (limit,),
+            """
+            SELECT c.*, n.published_at
+            FROM merchant_extraction_candidates c
+            JOIN xhs_notes n ON n.note_id = c.note_id
+            WHERE c.status = 'accepted' AND c.promoted_at IS NULL AND TRIM(c.candidate_name) <> ''
+            ORDER BY c.updated_at, c.candidate_id
+            """
         ).fetchall()
-    return list(rows)
+        promoted = 0
+        links = 0
+        tag_links = 0
+        for row in rows:
+            aliases = (row["aliases"] or [])
+            category_ids = (row["category_candidates"] or [])
+            tag_ids = (row["tag_candidates"] or [])
+            price = (row["price"] or {})
+            if not isinstance(aliases, list):
+                aliases = []
+            names = {normalize_name(n) for n in [row["candidate_name"], *aliases] if isinstance(n, str) and n.strip()}
+            matches = [m for m in existing if normalize_name(m["canonical_name"]) in names
+                       or normalize_name(row["candidate_name"]) in
+                       {normalize_name(a) for a in m["aliases"] if isinstance(a, str)}]
+            if len(matches) > 1:
+                conn.execute("UPDATE merchant_extraction_candidates SET status='needs_review', error_message=%s WHERE candidate_id=%s",
+                             ("名称或别名匹配多个商户，需要人工确认", row["candidate_id"]))
+                continue
+            merchant_id = matches[0]["merchant_id"] if matches else _merchant_id(row["candidate_name"])
+            canonical_name = matches[0]["canonical_name"] if matches else row["candidate_name"]
+            aliases = sorted(set([*aliases, *(matches[0]["aliases"] if matches else []), row["candidate_name"]]) - {canonical_name})
+            if not isinstance(category_ids, list):
+                category_ids = []
+            if not isinstance(tag_ids, list):
+                tag_ids = []
+            if not isinstance(price, dict):
+                price = {}
+            price_min = price.get("min")
+            price_max = price.get("max")
+            cuisine = [str(item) for item in category_ids if isinstance(item, str) and item.strip()]
+            conn.execute(
+                """INSERT INTO merchants (
+                    merchant_id, canonical_name, aliases, city, district, cuisine,
+                    price_min, price_max, currency, price_basis, reservation_info,
+                    confidence, first_seen_at, last_seen_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT(merchant_id) DO UPDATE SET
+                    canonical_name=excluded.canonical_name,
+                    aliases=CASE WHEN excluded.aliases <> '[]' THEN excluded.aliases ELSE merchants.aliases END,
+                    city=CASE WHEN excluded.city <> '' THEN excluded.city ELSE merchants.city END,
+                    district=CASE WHEN excluded.district <> '' THEN excluded.district ELSE merchants.district END,
+                    cuisine=CASE WHEN excluded.cuisine <> '[]' THEN excluded.cuisine ELSE merchants.cuisine END,
+                    price_min=COALESCE(excluded.price_min, merchants.price_min),
+                    price_max=COALESCE(excluded.price_max, merchants.price_max),
+                    currency=CASE WHEN excluded.currency <> '' THEN excluded.currency ELSE merchants.currency END,
+                    price_basis=CASE WHEN excluded.price_basis <> 'unknown' THEN excluded.price_basis ELSE merchants.price_basis END,
+                    reservation_info=CASE WHEN excluded.reservation_info <> '' THEN excluded.reservation_info ELSE merchants.reservation_info END,
+                    confidence=CASE WHEN excluded.confidence IS NOT NULL AND (merchants.confidence IS NULL OR excluded.confidence > merchants.confidence) THEN excluded.confidence ELSE merchants.confidence END,
+                    first_seen_at=CASE WHEN excluded.first_seen_at IS NULL OR excluded.first_seen_at = '' THEN merchants.first_seen_at WHEN merchants.first_seen_at IS NULL OR merchants.first_seen_at = '' THEN excluded.first_seen_at ELSE LEAST(merchants.first_seen_at, excluded.first_seen_at) END,
+                    last_seen_at=CASE WHEN excluded.last_seen_at IS NULL OR excluded.last_seen_at = '' THEN merchants.last_seen_at ELSE GREATEST(COALESCE(merchants.last_seen_at, ''), excluded.last_seen_at) END,
+                    updated_at=CURRENT_TIMESTAMP""",
+                (
+                    merchant_id,
+                    canonical_name,
+                    _json_text(aliases, []),
+                    row["city"] or "",
+                    row["district"] or "",
+                    _json_text(cuisine, []),
+                    price_min if isinstance(price_min, (int, float)) and not isinstance(price_min, bool) else None,
+                    price_max if isinstance(price_max, (int, float)) and not isinstance(price_max, bool) else None,
+                    str(price.get("currency", "") or ""),
+                    str(price.get("basis", "unknown") or "unknown"),
+                    row["reservation_info"] or "",
+                    float(row["confidence"]) if row["confidence"] is not None else None,
+                    row["published_at"] or "",
+                    row["published_at"] or "",
+                ),
+            )
+            promoted += 1
+
+            conn.execute(
+                """INSERT INTO merchant_notes (
+                    merchant_id, note_id, relation_type, evidence_text, confidence
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(merchant_id, note_id, relation_type) DO UPDATE SET
+                    evidence_text=CASE WHEN position(excluded.evidence_text IN merchant_notes.evidence_text)>0
+                        THEN merchant_notes.evidence_text ELSE concat_ws(E'\n', merchant_notes.evidence_text, excluded.evidence_text) END,
+                    confidence=GREATEST(merchant_notes.confidence, excluded.confidence)""",
+                (
+                    merchant_id,
+                    row["note_id"],
+                    row["relation_type"] or "mentioned",
+                    row["evidence_text"] or "",
+                    row["confidence"],
+                ),
+            )
+
+            for category_id in category_ids:
+                if not isinstance(category_id, str) or not category_id.strip():
+                    continue
+                category_exists = conn.execute(
+                    "SELECT 1 FROM merchant_categories WHERE category_id = %s AND status = 'active'",
+                    (category_id,),
+                ).fetchone()
+                if not category_exists:
+                    continue
+                conn.execute(
+                    """INSERT INTO merchant_category_links (
+                        merchant_id, category_id, source_note_id, evidence_text,
+                        confidence, is_primary, taxonomy_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'v1')
+                    ON CONFLICT(merchant_id, category_id, source_note_id) DO UPDATE SET
+                        evidence_text=CASE WHEN position(excluded.evidence_text IN merchant_category_links.evidence_text)>0
+                            THEN merchant_category_links.evidence_text ELSE concat_ws(E'\n', merchant_category_links.evidence_text, excluded.evidence_text) END,
+                        confidence=GREATEST(merchant_category_links.confidence, excluded.confidence),
+                        is_primary=merchant_category_links.is_primary OR excluded.is_primary""",
+                    (
+                        merchant_id,
+                        category_id,
+                        row["note_id"],
+                        row["evidence_text"] or "",
+                        row["confidence"],
+                        row["relation_type"] == "primary_review",
+                    ),
+                )
+                links += 1
+            for tag_id in tag_ids:
+                if not isinstance(tag_id, str) or not tag_id.strip():
+                    continue
+                tag_exists = conn.execute(
+                    "SELECT 1 FROM merchant_tags WHERE tag_id = %s AND status = 'active'",
+                    (tag_id,),
+                ).fetchone()
+                if not tag_exists:
+                    continue
+                conn.execute(
+                    """INSERT INTO merchant_tag_links (
+                        merchant_id, tag_id, source_note_id, evidence_text, confidence
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT(merchant_id, tag_id, source_note_id) DO UPDATE SET
+                        evidence_text=CASE WHEN position(excluded.evidence_text IN merchant_tag_links.evidence_text)>0
+                            THEN merchant_tag_links.evidence_text ELSE concat_ws(E'\n', merchant_tag_links.evidence_text, excluded.evidence_text) END,
+                        confidence=GREATEST(merchant_tag_links.confidence, excluded.confidence)""",
+                    (
+                        merchant_id,
+                        tag_id,
+                        row["note_id"],
+                        row["evidence_text"] or "",
+                        row["confidence"],
+                    ),
+                )
+                tag_links += 1
+            conn.execute("UPDATE merchant_extraction_candidates SET promoted_at=CURRENT_TIMESTAMP WHERE candidate_id=%s", (row["candidate_id"],))
+            if matches:
+                matches[0]["aliases"] = aliases
+            else:
+                existing.append({"merchant_id": merchant_id, "canonical_name": canonical_name, "aliases": aliases})
+        return {"promoted": promoted, "category_links": links, "tag_links": tag_links}
+
+
+def _backfill_extraction_state(conn: Connection) -> None:
+    """承接旧候选表的进度；失败占位记录不算完成。"""
+    conn.execute("""INSERT INTO merchant_extraction_state(note_id, source_content_hash, status)
+        SELECT DISTINCT ON (c.note_id) c.note_id, c.source_content_hash, 'completed'
+        FROM merchant_extraction_candidates c
+        WHERE TRIM(c.candidate_name) <> ''
+          AND NOT EXISTS (SELECT 1 FROM merchant_extraction_candidates f
+                          WHERE f.note_id=c.note_id AND f.candidate_name=''
+                            AND f.updated_at >= c.updated_at)
+        ORDER BY c.note_id, c.updated_at DESC
+        ON CONFLICT(note_id) DO NOTHING""")
+    conn.commit()
+
+
+def _load_notes(conn: Connection, note_id: str | None, limit: int, force: bool = False) -> list[DictRow]:
+    _backfill_extraction_state(conn)
+    return list(conn.execute(
+        """SELECT n.* FROM xhs_notes n LEFT JOIN merchant_extraction_state s ON s.note_id=n.note_id
+           WHERE (%s IS NULL OR n.note_id=%s)
+             AND (%s OR NOT EXISTS (SELECT 1 FROM merchant_extraction_state s
+                                    WHERE s.note_id=n.note_id AND s.status='completed'))
+             AND (NULLIF(TRIM(content), '') IS NOT NULL
+                  OR NULLIF(TRIM(description), '') IS NOT NULL
+                  OR NULLIF(TRIM(title), '') IS NOT NULL)
+           ORDER BY COALESCE(s.updated_at, n.crawled_at), n.note_id LIMIT %s""",
+        (note_id, note_id, force, limit),
+    ).fetchall())
 
 
 def _prompt(note: DictRow, categories: list[dict[str, str]], tags: list[dict[str, str]]) -> str:
@@ -695,15 +758,27 @@ def call_agent(
     raise RuntimeError(f"Agent 调用失败: {last_error}") from last_error
 
 
-def extract_notes(conn: Connection, notes: list[DictRow], config: MerchantAgentConfig) -> dict[str, int]:
+def extract_notes(conn: Connection, notes: list[DictRow], config: MerchantAgentConfig, force: bool = False) -> dict[str, int]:
     seed_taxonomy(conn)
+    _backfill_extraction_state(conn)
     valid_categories = _active_categories(conn)
     valid_tags = _active_tags(conn)
     categories, tags = _active_taxonomy_rows(conn)
-    stats = {"notes": 0, "accepted": 0, "needs_review": 0, "failed": 0}
+    stats = {"notes": 0, "accepted": 0, "needs_review": 0, "failed": 0, "skipped": 0}
     selected = notes[: config.max_notes]
     total = len(selected)
     for index, note in enumerate(selected, start=1):
+        lock_key = "merchant-extract:" + note["note_id"]
+        locked = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (lock_key,)).fetchone()[0]
+        if not locked:
+            stats["skipped"] += 1
+            continue
+        state = conn.execute("SELECT status FROM merchant_extraction_state WHERE note_id=%s", (note["note_id"],)).fetchone()
+        if state and state["status"] == "completed" and not force:
+            conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock_key,))
+            conn.commit()
+            stats["skipped"] += 1
+            continue
         stats["notes"] += 1
         print(
             f"[MERCHANT] [{index}/{total}] 抽取笔记 {note['note_id']}",
@@ -712,15 +787,24 @@ def extract_notes(conn: Connection, notes: list[DictRow], config: MerchantAgentC
         )
         try:
             result, raw = call_agent(note, config, categories, tags)
-            merchants = result.get("merchants", [])
+            merchants = result.get("merchants")
             if not isinstance(merchants, list):
                 raise ValueError("merchants 必须是数组")
+            accepted = needs_review = 0
             for item in merchants:
                 if not isinstance(item, dict):
                     item = {"name": "", "evidence": []}
                 errors = validate_candidate(item, note_text(note), valid_categories or None, valid_tags or None)
-                save_candidate(conn, note, item, config, errors, raw)
-                stats["needs_review" if errors else "accepted"] += 1
+                save_candidate(conn, note, item, config, errors, raw, commit=False)
+                needs_review += bool(errors)
+                accepted += not errors
+            conn.execute("""INSERT INTO merchant_extraction_state(note_id, source_content_hash, status)
+                VALUES (%s, %s, 'completed') ON CONFLICT(note_id) DO UPDATE SET
+                source_content_hash=excluded.source_content_hash, status='completed', error_message='', updated_at=NOW()""",
+                (note["note_id"], source_hash(note)))
+            conn.commit()
+            stats["accepted"] += accepted
+            stats["needs_review"] += needs_review
             print(
                 f"[MERCHANT] [{index}/{total}] 返回 {len(merchants)} 个候选",
                 file=sys.stderr,
@@ -734,13 +818,15 @@ def extract_notes(conn: Connection, notes: list[DictRow], config: MerchantAgentC
                 file=sys.stderr,
                 flush=True,
             )
-            save_candidate(
-                conn,
-                note,
-                {"name": "", "evidence": []},
-                config,
-                [str(exc)],
-            )
+            conn.execute("""INSERT INTO merchant_extraction_state(note_id, source_content_hash, status, error_message)
+                VALUES (%s, %s, 'failed', %s) ON CONFLICT(note_id) DO UPDATE SET
+                status='failed', error_message=excluded.error_message, updated_at=NOW()""",
+                (note["note_id"], source_hash(note), str(exc)))
+            conn.commit()
+        finally:
+            conn.rollback()
+            conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock_key,))
+            conn.commit()
     stats.update(promote_candidates(conn))
     return stats
 
@@ -768,18 +854,103 @@ def import_candidates(conn: Connection, path: Path, config: MerchantAgentConfig)
         raise ValueError("merchants 必须是数组")
     valid_categories = _active_categories(conn)
     valid_tags = _active_tags(conn)
-    valid = invalid = 0
-    for candidate in merchants:
-        if not isinstance(candidate, dict):
-            candidate = {"name": "", "evidence": []}
-        errors = validate_candidate(candidate, note_text(note), valid_categories or None, valid_tags or None)
-        save_candidate(conn, note, candidate, config, errors, json.dumps(payload, ensure_ascii=False))
-        if errors:
-            invalid += 1
-        else:
-            valid += 1
+    with conn:
+        valid = invalid = 0
+        for candidate in merchants:
+            if not isinstance(candidate, dict):
+                candidate = {"name": "", "evidence": []}
+            errors = validate_candidate(candidate, note_text(note), valid_categories or None, valid_tags or None)
+            save_candidate(conn, note, candidate, config, errors, json.dumps(payload, ensure_ascii=False), commit=False)
+            if errors:
+                invalid += 1
+            else:
+                valid += 1
+        conn.execute("""INSERT INTO merchant_extraction_state(note_id, source_content_hash, status)
+            VALUES (%s, %s, 'completed') ON CONFLICT(note_id) DO UPDATE SET
+            source_content_hash=excluded.source_content_hash, status='completed', error_message='', updated_at=NOW()""",
+            (note_id, source_hash(note)))
     promoted = promote_candidates(conn)
     return valid, invalid, promoted["promoted"]
+
+
+def deduplicate_merchants(conn: Connection, backup_path: Path | None = None) -> list[dict[str, Any]]:
+    """只合并规范化同名或明确别名对应的商户；默认仅预览。"""
+    from psycopg2 import sql
+
+    conn.execute("SELECT pg_advisory_xact_lock(734982107)")
+    rows = [dict(row) for row in conn.execute("SELECT * FROM merchants ORDER BY merchant_id")]
+    groups: list[list[dict[str, Any]]] = []
+    for row in rows:
+        related = []
+        for group in groups:
+            if any(normalize_name(row["canonical_name"]) in
+                   {normalize_name(n) for n in [m["canonical_name"], *m["aliases"]]}
+                   or normalize_name(m["canonical_name"]) in
+                   {normalize_name(n) for n in [row["canonical_name"], *row["aliases"]]}
+                   for m in group):
+                related.append(group)
+        merged = [row]
+        for group in related:
+            merged.extend(group)
+            groups.remove(group)
+        groups.append(merged)
+    groups = [sorted(g, key=lambda m: (-len(m["aliases"]), m["merchant_id"])) for g in groups if len(g) > 1]
+    plan = [{"keep": g[0]["canonical_name"], "merge": [m["canonical_name"] for m in g[1:]]} for g in groups]
+    if backup_path is None or not groups:
+        conn.rollback()
+        return plan
+    ids = [m["merchant_id"] for g in groups for m in g]
+    tables = ("merchants", "merchant_notes", "merchant_category_links", "merchant_tag_links")
+    backup = {table: [dict(r) for r in conn.execute(
+        sql.SQL("SELECT * FROM {} WHERE merchant_id=ANY(%s)").format(sql.Identifier(table)), (ids,))]
+        for table in tables}
+    # 写出完整备份后才修改；禁止覆盖已有备份。
+    with backup_path.open("x", encoding="utf-8") as output:
+        json.dump(backup, output, ensure_ascii=False, indent=2, default=str)
+    with conn:
+        for group in groups:
+            keep = group[0]
+            aliases = sorted({n for m in group for n in [m["canonical_name"], *m["aliases"]]} - {keep["canonical_name"]})
+            merged = dict(keep)
+            for other in group[1:]:
+                for field in ("city", "district", "reservation_info", "currency", "price_min", "price_max"):
+                    if merged[field] is None or merged[field] == "":
+                        merged[field] = other[field]
+                if merged["price_basis"] == "unknown":
+                    merged["price_basis"] = other["price_basis"]
+            cuisine = sorted({c for m in group for c in m["cuisine"]})
+            confidence = max((m["confidence"] for m in group if m["confidence"] is not None), default=None)
+            first_seen = min((m["first_seen_at"] for m in group if m["first_seen_at"]), default=None)
+            last_seen = max((m["last_seen_at"] for m in group if m["last_seen_at"]), default=None)
+            conn.execute("""UPDATE merchants SET aliases=%s, cuisine=%s, city=%s, district=%s,
+                reservation_info=%s, currency=%s, price_min=%s, price_max=%s, price_basis=%s,
+                confidence=%s, first_seen_at=%s, last_seen_at=%s, updated_at=NOW() WHERE merchant_id=%s""",
+                (_json_text(aliases, []), _json_text(cuisine, []), merged["city"], merged["district"],
+                 merged["reservation_info"], merged["currency"], merged["price_min"], merged["price_max"],
+                 merged["price_basis"], confidence, first_seen, last_seen, keep["merchant_id"]))
+            for other in group[1:]:
+                for table in tables[1:]:
+                    columns = list(backup[table][0]) if backup[table] else []
+                    if not columns:
+                        continue
+                    keys = {"merchant_notes": ["merchant_id", "note_id", "relation_type"],
+                            "merchant_category_links": ["merchant_id", "category_id", "source_note_id"],
+                            "merchant_tag_links": ["merchant_id", "tag_id", "source_note_id"]}[table]
+                    conn.execute(sql.SQL("""INSERT INTO {table} ({columns})
+                        SELECT %s, {rest} FROM {table} WHERE merchant_id=%s
+                        ON CONFLICT ({keys}) DO UPDATE SET
+                        evidence_text=CASE WHEN {table}.evidence_text=excluded.evidence_text
+                            THEN {table}.evidence_text ELSE concat_ws(E'\\n', NULLIF({table}.evidence_text, ''), NULLIF(excluded.evidence_text, '')) END,
+                        confidence=GREATEST({table}.confidence, excluded.confidence){primary}""").format(
+                            table=sql.Identifier(table), columns=sql.SQL(",").join(map(sql.Identifier, columns)),
+                            rest=sql.SQL(",").join(sql.Identifier(c) for c in columns if c != "merchant_id"),
+                            keys=sql.SQL(",").join(map(sql.Identifier, keys)),
+                            primary=sql.SQL(", is_primary=merchant_category_links.is_primary OR excluded.is_primary")
+                            if table == "merchant_category_links" else sql.SQL("")),
+                        (keep["merchant_id"], other["merchant_id"]))
+                    conn.execute(sql.SQL("DELETE FROM {} WHERE merchant_id=%s").format(sql.Identifier(table)), (other["merchant_id"],))
+                conn.execute("DELETE FROM merchants WHERE merchant_id=%s", (other["merchant_id"],))
+    return plan
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -789,9 +960,12 @@ def build_parser() -> argparse.ArgumentParser:
     extract = sub.add_parser("extract", help="调用 .env 中配置的 Agent 抽取笔记")
     extract.add_argument("--note-id")
     extract.add_argument("--limit", type=int, default=None)
+    extract.add_argument("--force", action="store_true", help="显式重新抽取已完成笔记；默认接着未完成的做")
     import_cmd = sub.add_parser("import", help="校验并导入 Agent 结果 JSON")
     import_cmd.add_argument("--input", required=True, type=Path)
     sub.add_parser("promote", help="将 accepted 候选幂等写入正式商户索引")
+    dedupe = sub.add_parser("dedupe", help="预览规范化同名/明确别名的重复商户")
+    dedupe.add_argument("--backup", type=Path, help="指定新备份文件后执行合并，同时保留来源关系")
     validate = sub.add_parser("validate", help="校验 Agent 结果 JSON，不写库")
     validate.add_argument("--input", required=True, type=Path)
     return parser
@@ -830,8 +1004,11 @@ def main(argv: list[str] | None = None) -> int:
             result = promote_candidates(conn)
             print(json.dumps(result, ensure_ascii=False))
             return 0
+        if args.command == "dedupe":
+            print(json.dumps(deduplicate_merchants(conn, args.backup), ensure_ascii=False, indent=2))
+            return 0
         limit = args.limit or config.max_notes
-        stats = extract_notes(conn, _load_notes(conn, args.note_id, limit), config)
+        stats = extract_notes(conn, _load_notes(conn, args.note_id, limit, args.force), config, args.force)
         print(json.dumps(stats, ensure_ascii=False))
         return 0 if stats["failed"] == 0 else 1
     finally:

@@ -203,6 +203,17 @@ CREATE TABLE IF NOT EXISTS merchant_extraction_candidates (
 -- 兼容已存在的 PostgreSQL 商户候选表。
 ALTER TABLE merchant_extraction_candidates
     ADD COLUMN IF NOT EXISTS tag_candidates JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE merchant_extraction_candidates
+    ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ;
+
+-- 完成标记独立于候选：没有商户的笔记也必须记录进度。
+CREATE TABLE IF NOT EXISTS merchant_extraction_state (
+    note_id TEXT PRIMARY KEY REFERENCES xhs_notes(note_id),
+    source_content_hash TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+    error_message TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE INDEX IF NOT EXISTS idx_merchants_name ON merchants(canonical_name);
 CREATE INDEX IF NOT EXISTS idx_merchants_city_district ON merchants(city, district);

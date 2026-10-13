@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import sys
 import time
@@ -93,23 +94,39 @@ def _get_ocr_engine():
     return _ocr_engine
 
 
-def _do_ocr(image_paths: list[Path]) -> str:
+def _do_ocr(image_paths: list[Path], cache_path: Path | None = None) -> str:
     """对所有图片做 OCR，返回合并的文字。复用 OCR 实例。"""
     if not image_paths:
         return ""
-    ocr = _get_ocr_engine()
-    if not ocr:
-        _msg("rapidocr 未安装，跳过 OCR")
-        return ""
+    cached = {}
+    if cache_path and cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(cached, dict):
+                cached = {}
+        except (OSError, ValueError):
+            pass
     try:
         parts: list[str] = []
         for fp in image_paths:
             try:
-                img_result, _ = ocr(str(fp))
-                if img_result:
-                    texts = [item[1].strip() for item in img_result if len(item) >= 2 and item[1].strip()]
-                    if texts:
-                        parts.append(f"[{fp.name}] {' '.join(texts)}")
+                key = hashlib.sha256(fp.read_bytes()).hexdigest()
+                if key in cached:
+                    text = cached[key]
+                else:
+                    ocr = _get_ocr_engine()
+                    if not ocr:
+                        _msg("rapidocr 未安装，跳过 OCR")
+                        continue
+                    img_result, _ = ocr(str(fp))
+                    text = " ".join(item[1].strip() for item in (img_result or []) if len(item) >= 2 and item[1].strip())
+                    cached[key] = text
+                    if cache_path:
+                        from xhs_storage import _atomic_write
+                        cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        _atomic_write(cache_path, json.dumps(cached, ensure_ascii=False))
+                if text:
+                    parts.append(f"[{fp.name}] {text}")
             except Exception:
                 continue
         _msg(f"OCR 完成: {len(parts)}/{len(image_paths)} 张图有文字")
@@ -162,8 +179,13 @@ def analyze_images(
 
     # 2. OCR
     _msg("OCR 识别中...")
-    ocr_text = _do_ocr(image_paths)
+    ocr_text = _do_ocr(image_paths, image_paths[0].parent / "_cache" / "image_ocr.json")
     result["ocr_text"] = ocr_text
+    try:
+        cached = json.loads((image_paths[0].parent / "_cache" / "image_ocr.json").read_text(encoding="utf-8"))
+        result["completed"] = isinstance(cached, dict) and all(hashlib.sha256(path.read_bytes()).hexdigest() in cached for path in image_paths)
+    except (OSError, ValueError, TypeError):
+        result["completed"] = False
     if ocr_text:
         _msg(f"OCR 完成: {len(ocr_text)} 字")
     else:
@@ -215,6 +237,8 @@ def cmd_analyze_images(args) -> int:
             summary="",
             mermaid="",
         )
+        xhs_storage.update_crawl_state(conn, f"image-analysis:{args.note_id}", "image-analysis", args.note_id, "",
+                                       "completed" if result.get("completed") else "failed")
 
         # 打印更新内容摘要
         print(f"\n[OK] 《{title}》图片分析完成:")

@@ -139,7 +139,7 @@ def test_download_updates_media_metadata_directly(db_conn, tmp_path, monkeypatch
     xhs_media.download_media("media", db_conn, with_video=False)
     note = get_note(db_conn, "media")
     assert note["has_local_media"] is True
-    assert note["media_path"] == "media/作者/探店"
+    assert note["media_path"] == "media/作者/探店_media"
 
 
 def test_incomplete_refresh_preserves_analysis_and_media_urls(db_conn):
@@ -206,4 +206,4 @@ def test_cleanup_preview_and_execution(db_conn, tmp_path, monkeypatch):
     args.dry_run = False
     assert cmd_cleanup(args) == 0
     assert db_conn.execute("SELECT keyword FROM xhs_search_cache").fetchone()[0] == "keep"
-    assert [row[0] for row in db_conn.execute("SELECT task_id FROM xhs_crawl_state")] == ["recent"]
+    assert {row[0] for row in db_conn.execute("SELECT task_id FROM xhs_crawl_state")} == {"old", "recent"}

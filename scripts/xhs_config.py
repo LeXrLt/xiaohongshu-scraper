@@ -290,6 +290,16 @@ def note_media_dir(note_id: str, conn=None) -> Path:
     查不到时 fallback 到 media/<note_id>/。
     """
     if conn is not None:
+        stored = conn.execute("SELECT media_path FROM xhs_notes WHERE note_id=%s", (note_id,)).fetchone()
+        if stored and stored[0]:
+            existing = DATA_DIR / stored[0]
+            if existing.is_dir():
+                return existing
+            # MEDIA_DIR 可独立配置；仍按已落库的相对路径查找。
+            if stored[0].startswith("media/"):
+                existing = MEDIA_DIR / stored[0][len("media/"):]
+                if existing.is_dir():
+                    return existing
         row = conn.execute("SELECT n.title, n.user_id, u.nickname "
                            "FROM xhs_notes n LEFT JOIN xhs_users u ON n.user_id = u.user_id "
                            "WHERE n.note_id = %s", (note_id,)).fetchone()
@@ -301,9 +311,9 @@ def note_media_dir(note_id: str, conn=None) -> Path:
                 safe_title = sanitize_filename(title, 60)
                 if nickname:
                     safe_author = sanitize_filename(nickname, 30)
-                    return MEDIA_DIR / safe_author / safe_title
+                    return MEDIA_DIR / safe_author / f"{safe_title}_{note_id}"
                 elif user_id:
-                    return MEDIA_DIR / user_id / safe_title
+                    return MEDIA_DIR / user_id / f"{safe_title}_{note_id}"
     return MEDIA_DIR / note_id
 
 # ---------------------------------------------------------------------------

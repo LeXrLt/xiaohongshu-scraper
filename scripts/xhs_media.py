@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import random
+import json
 import sys
 import time
 from pathlib import Path
@@ -36,7 +37,7 @@ def guess_ext(url: str, default: str = ".jpg") -> str:
 
 def _media_out_dir(note_id: str, conn: Connection) -> Path:
     """计算媒体输出目录: media/<博主名>/<笔记标题>/。"""
-    return xhs_config.note_media_dir(note_id, conn)
+    return xhs_storage._find_media_dir(note_id, conn)
 
 
 def download_media(
@@ -72,7 +73,7 @@ def download_media(
     for i, url in enumerate(images, 1):
         ext = guess_ext(url, default=".jpg")
         dst = out / f"img_{i:02d}{ext}"
-        if dst.exists() and not overwrite:
+        if dst.exists() and dst.stat().st_size > 0 and not overwrite:
             n_ok += 1  # 已有算成功
             continue
         try:
@@ -97,7 +98,7 @@ def download_media(
         video_url = row["video_url"] or xhs_storage._extract_video_url(raw)
         if video_url:
             dst = out / "video.mp4"
-            if dst.exists() and not overwrite:
+            if dst.exists() and dst.stat().st_size > 0 and not overwrite:
                 n_video = 1
             else:
                 try:
@@ -177,76 +178,73 @@ def _refresh_video_url(note_id: str, conn: Connection) -> None:
 
 
 def post_process_note(note: dict, conn: Connection, args) -> None:
-    """根据 --download / --analyze 标志对单条笔记做后处理。"""
-    do_download = getattr(args, "download", False)
-    do_analyze = getattr(args, "analyze", False)
-    if not do_download and not do_analyze:
-        return
+    """独立记录下载和分析进度，页面游标前移不丢失失败任务。"""
     note_id = note["note_id"]
+    title = note.get("title") or note_id
     is_video = note.get("type") == "video"
-    title = note.get("title") or note.get("description", "")[:20] or note_id
 
-    if do_download:
+    def state(kind, status, error=""):
+        xhs_storage.update_crawl_state(conn, f"{kind}:{note_id}", kind, note_id, "", status, error)
+
+    if getattr(args, "download", False):
+        state("media-download", "running")
         try:
             n_img, n_vid, n_err, out = download_media(note_id, conn, with_video=True)
-            if n_img + n_vid > 0:
-                parts = []
-                if n_img:
-                    parts.append(f"{n_img}张图")
-                if n_vid:
-                    parts.append("视频")
-                rel = out.relative_to(xhs_config.MEDIA_DIR)
-                print(f"    [download] 《{title}》{'+'.join(parts)} → {rel}", file=sys.stderr)
-        except Exception as e:
-            print(f"    [download] 《{title}》失败: {e}", file=sys.stderr)
+            done = n_err == 0 and (not is_video or n_vid > 0)
+            state("media-download", "completed" if done else "failed", "" if done else "媒体未完整下载")
+            print(f"    [download] 《{title}》: {n_img} 张图，{n_vid} 个视频，{n_err} 个失败", file=sys.stderr)
+        except Exception as exc:
+            state("media-download", "failed", str(exc))
+            print(f"    [download] 《{title}》失败: {exc}", file=sys.stderr)
 
-    if do_analyze and is_video:
-        try:
+    if not getattr(args, "analyze", False):
+        return
+    kind = "video-analysis" if is_video else "image-analysis"
+    state(kind, "running")
+    try:
+        if is_video:
             import xhs_video
             video_local = find_video_local(note_id, conn)
             if not video_local:
-                # video_url 可能为空（列表 API 不返回完整 video 信息）
-                # 先尝试抓笔记详情补全 video_url
                 if not note.get("video_url"):
                     _refresh_video_url(note_id, conn)
-                _, _, _, out = download_media(note_id, conn, with_video=True)
-                video_local = out / "video.mp4"
-            if video_local.exists():
-                cfg = xhs_video.load_config()
-                result = xhs_video.analyze_video(video_local, cfg)
-                ocr_text = json.dumps(result.get("ocr_results", []), ensure_ascii=False)
-                xhs_storage.update_video_analysis(
-                    conn, note_id,
-                    transcript=result.get("transcript", ""),
-                    ocr_text=ocr_text,
-                    summary="llm纠错" if result.get("corrected") else "",
-                )
-                updates = []
-                if result.get("transcript"):
-                    updates.append(f"转录{len(result['transcript'])}字")
-                if result.get("corrected"):
-                    updates.append("已纠错")
-                if result.get("ocr_results"):
-                    updates.append(f"OCR {len(result['ocr_results'])}帧")
-                detail = "、".join(updates) if updates else "无新内容"
-                print(f"    [analyze] 《{title}》: {detail}", file=sys.stderr)
-            else:
-                print(f"    [analyze] 《{title}》视频下载失败，跳过分析", file=sys.stderr)
-        except Exception as e:
-            print(f"    [analyze] 《{title}》失败: {e}", file=sys.stderr)
-    elif do_analyze and not is_video:
-        # 图文笔记 → 图片 OCR
-        try:
+                download_media(note_id, conn, with_video=True)
+                video_local = find_video_local(note_id, conn)
+            if not video_local:
+                raise RuntimeError("视频下载未完成")
+            result = xhs_video.analyze_video(video_local, xhs_video.load_config())
+            xhs_storage.update_video_analysis(
+                conn, note_id, transcript=result.get("transcript", ""),
+                ocr_text=json.dumps(result.get("ocr_results", []), ensure_ascii=False),
+                summary="llm纠错" if result.get("corrected") else "",
+            )
+        else:
             import xhs_image
             result = xhs_image.analyze_images(note_id, conn)
-            xhs_storage.update_image_analysis(
-                conn, note_id,
-                ocr_text=result.get("ocr_text", ""),
-                summary="",
-                mermaid="",
-            )
-            ocr_text = result.get("ocr_text", "")
-            detail = f"OCR {len(ocr_text)} 字" if ocr_text else "无 OCR 文字"
-            print(f"    [analyze-image] 《{title}》: {detail}", file=sys.stderr)
-        except Exception as e:
-            print(f"    [analyze-image] 《{title}》失败: {e}", file=sys.stderr)
+            xhs_storage.update_image_analysis(conn, note_id, ocr_text=result.get("ocr_text", ""))
+        done = bool(result.get("completed"))
+        state(kind, "completed" if done else "failed", "" if done else "分析阶段未全部完成，等待重试")
+        print(f"    [{kind}] 《{title}》: {'完成' if done else '进度已保存，等待重试'}", file=sys.stderr)
+    except Exception as exc:
+        state(kind, "failed", str(exc))
+        print(f"    [{kind}] 《{title}》失败: {exc}", file=sys.stderr)
+
+
+def resume_pending(conn: Connection, args, limit: int = 100) -> None:
+    """抓取页已前移后，仍能独立重试未完成的下载和分析。"""
+    kinds = []
+    if getattr(args, "download", False):
+        kinds.append("media-download")
+    if getattr(args, "analyze", False):
+        kinds.extend(["image-analysis", "video-analysis"])
+    if not kinds:
+        return
+    rows = conn.execute("""SELECT target_id, array_agg(DISTINCT task_type) AS kinds
+        FROM xhs_crawl_state WHERE task_type=ANY(%s) AND status <> 'completed'
+        GROUP BY target_id ORDER BY MIN(updated_at), target_id LIMIT %s""", (kinds, limit)).fetchall()
+    from types import SimpleNamespace
+    for row in rows:
+        note = xhs_storage.get_note(conn, row["target_id"])
+        if note:
+            post_process_note(dict(note), conn, SimpleNamespace(download="media-download" in row["kinds"],
+                                                               analyze=any(k.endswith("analysis") for k in row["kinds"])))

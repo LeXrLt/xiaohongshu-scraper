@@ -314,21 +314,19 @@ def _ocr_single(fp: Path, time_label: str = "") -> dict[str, str] | None:
     ocr = _get_ocr()
     if ocr is None:
         return None
-    try:
-        img_result, _ = ocr(str(fp))
-        texts = []
-        if img_result:
-            for item in img_result:
-                if len(item) >= 2 and item[1].strip():
-                    texts.append(item[1].strip())
-        if texts:
-            return {"frame": fp.name, "time": time_label, "text": " ".join(texts)}
-    except Exception:
-        pass
+    img_result, _ = ocr(str(fp))
+    texts = []
+    if img_result:
+        for item in img_result:
+            if len(item) >= 2 and item[1].strip():
+                texts.append(item[1].strip())
+    if texts:
+        return {"frame": fp.name, "time": time_label, "text": " ".join(texts)}
     return None
 
 
-def ocr_frames(frame_paths: list[Path], timestamps: dict[int, float] | None = None) -> list[dict[str, str]]:
+def ocr_frames(frame_paths: list[Path], timestamps: dict[int, float] | None = None,
+               cache_path: Path | None = None) -> list[dict[str, str]]:
     """对帧图片做 OCR，返回 [{"frame": "frame_0001.jpg", "time": "00:05", "text": "..."}]。复用 OCR 实例。"""
     ocr = _get_ocr()
     if ocr is None:
@@ -336,11 +334,28 @@ def ocr_frames(frame_paths: list[Path], timestamps: dict[int, float] | None = No
         return []
 
     timestamps = timestamps or {}
+    cached = {}
+    if cache_path and cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(cached, dict):
+                cached = {}
+        except (OSError, ValueError):
+            pass
     results: list[dict[str, str]] = []
     for i, fp in enumerate(frame_paths, 1):
         sec = timestamps.get(i)
         time_label = _format_time(sec) if sec is not None else ""
-        r = _ocr_single(fp, time_label)
+        import hashlib
+        key = hashlib.sha256(fp.read_bytes()).hexdigest() + ":" + fp.name + ":" + time_label
+        if key in cached:
+            r = cached[key]
+        else:
+            r = _ocr_single(fp, time_label)
+            cached[key] = r  # 无文字也是成功结果；异常不会写入缓存。
+            if cache_path:
+                from xhs_storage import _atomic_write
+                _atomic_write(cache_path, json.dumps(cached, ensure_ascii=False))
         if r:
             results.append(r)
 
@@ -353,11 +368,11 @@ def ocr_frames(frame_paths: list[Path], timestamps: dict[int, float] | None = No
 # ----------------------------------------------------------------
 
 
-def _correct_via_openai(prompt: str, cfg: dict, fallback: str) -> str:
+def _correct_via_openai(prompt: str, cfg: dict, fallback: str) -> str | None:
     """通过 OpenAI API 纠正转录错误。"""
     api_key = cfg.get("openai_api_key", "")
     if not api_key:
-        return fallback
+        return None
     model = cfg.get("openai_model", "gpt-4o-mini")
     base_url = cfg.get("openai_base_url", "") or "https://api.openai.com/v1"
     try:
@@ -369,13 +384,13 @@ def _correct_via_openai(prompt: str, cfg: dict, fallback: str) -> str:
             timeout=60,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip() or fallback
+        return resp.json()["choices"][0]["message"]["content"].strip() or None
     except Exception as e:
         _msg(f"纠错 OpenAI 调用失败: {e}")
-        return fallback
+        return None
 
 
-def _correct_via_ollama(prompt: str, cfg: dict, fallback: str) -> str:
+def _correct_via_ollama(prompt: str, cfg: dict, fallback: str) -> str | None:
     """通过 Ollama 纠正转录错误。"""
     url = cfg.get("ollama_url", "http://localhost:11434")
     model = cfg.get("ollama_model", "qwen2.5:7b")
@@ -387,13 +402,13 @@ def _correct_via_ollama(prompt: str, cfg: dict, fallback: str) -> str:
             timeout=120,
         )
         resp.raise_for_status()
-        return resp.json().get("response", "").strip() or fallback
+        return resp.json().get("response", "").strip() or None
     except Exception as e:
         _msg(f"纠错 Ollama 调用失败: {e}")
-        return fallback
+        return None
 
 
-def _correct_transcript(transcript: str, ocr_results: list[dict], cfg: dict) -> str:
+def _correct_transcript(transcript: str, ocr_results: list[dict], cfg: dict) -> str | None:
     """用 OCR 画面文字做参照，调用 LLM 纠正 Whisper 转录中的同音字和英文错误。"""
     ocr_text = " ".join(r["text"] for r in ocr_results)
     if not transcript or not ocr_text:
@@ -430,7 +445,7 @@ def _correct_transcript(transcript: str, ocr_results: list[dict], cfg: dict) -> 
     elif mode == "ollama":
         return _correct_via_ollama(prompt, cfg, transcript)
     else:
-        return transcript  # 无 LLM 可用则跳过
+        return None  # 无 LLM 可用则保持未完成
 
 
 def _ollama_available(cfg: dict) -> bool:
@@ -461,6 +476,8 @@ def analyze_video(
            ["ocr"]      → 仅 OCR（需先 extract）
            支持任意组合，如 ["extract", "transcribe"]
     """
+    from xhs_storage import _atomic_write
+
     cfg = cfg or load_config()
     all_steps = steps is None
     cache_dir = video_path.parent / "_cache"
@@ -481,9 +498,30 @@ def analyze_video(
     ocr_cache = cache_dir / "ocr.json"
     ts_cache = cache_dir / "frame_timestamps.json"
 
+    manifest_path = cache_dir / "analysis_input.json"
+    signature = {"size": video_path.stat().st_size, "mtime_ns": video_path.stat().st_mtime_ns,
+                 "config": {key: cfg.get(key) for key in ("max_transcribe_seconds", "frame_interval", "whisper_model", "whisper_beam_size", "correct_mode", "openai_model", "ollama_model")}}
+    previous = None
+    if manifest_path.exists():
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+    if previous is not None and previous != signature:
+        for cached_file in [audio_cache, transcript_cache, ocr_cache, ts_cache,
+                            cache_dir / "transcript_corrected.json", cache_dir / "frame_ocr.json"]:
+            cached_file.unlink(missing_ok=True)
+        for frame in (cache_dir / "frames").glob("frame_*.jpg"):
+            frame.unlink()
+    _atomic_write(manifest_path, json.dumps(signature, ensure_ascii=False))
+
+    transcript_done = ocr_done = False
     if transcript_cache.exists():
         try:
             d = json.loads(transcript_cache.read_text(encoding="utf-8"))
+            if not isinstance(d, dict) or "text" not in d:
+                raise ValueError("无效的转录缓存")
+            transcript_done = True
             result["transcript"] = d.get("text", "")
             result["segments"] = d.get("segments", [])
             result["audio_duration"] = d.get("duration", 0.0)
@@ -491,7 +529,11 @@ def analyze_video(
             pass
     if ocr_cache.exists():
         try:
-            result["ocr_results"] = json.loads(ocr_cache.read_text(encoding="utf-8"))
+            cached_ocr = json.loads(ocr_cache.read_text(encoding="utf-8"))
+            if not isinstance(cached_ocr, list):
+                raise ValueError("无效的 OCR 缓存")
+            result["ocr_results"] = cached_ocr
+            ocr_done = True
         except Exception:
             pass
 
@@ -501,24 +543,28 @@ def analyze_video(
         if has_ffmpeg():
             try:
                 _msg("提取音频...")
-                extract_audio(video_path, output_path=audio_cache,
-                              max_seconds=max_sec if max_sec > 0 else 0)
+                if not audio_cache.exists() or audio_cache.stat().st_size == 0:
+                    audio_tmp = audio_cache.with_name("audio.tmp.wav")
+                    extract_audio(video_path, output_path=audio_tmp,
+                                  max_seconds=max_sec if max_sec > 0 else 0)
+                    audio_tmp.replace(audio_cache)
                 _msg(f"音频已缓存: {audio_cache}")
             except Exception as e:
                 _msg(f"音频提取失败: {e}")
             try:
                 frame_dir = cache_dir / "frames"
-                frame_paths, frame_timestamps = extract_keyframes(
-                    video_path, frame_dir,
-                    fallback_interval=cfg.get("frame_interval", 5),
-                )
+                frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
+                if not (frame_paths and ts_cache.exists()):
+                    frame_paths, frame_timestamps = extract_keyframes(
+                        video_path, frame_dir,
+                        fallback_interval=cfg.get("frame_interval", 5),
+                    )
+                else:
+                    frame_timestamps = json.loads(ts_cache.read_text(encoding="utf-8"))
                 result["keyframes"] = len(frame_paths)
                 # 缓存时间戳
                 if frame_timestamps:
-                    ts_cache.write_text(
-                        json.dumps({str(k): v for k, v in frame_timestamps.items()}, ensure_ascii=False),
-                        encoding="utf-8",
-                    )
+                    _atomic_write(ts_cache, json.dumps({str(k): v for k, v in frame_timestamps.items()}, ensure_ascii=False))
                 _msg(f"关键帧已缓存: {len(frame_paths)} 帧")
             except Exception as e:
                 _msg(f"关键帧提取失败: {e}")
@@ -526,7 +572,7 @@ def analyze_video(
             _msg("跳过提取（缺少 ffmpeg）")
 
     # 2. 转录（transcribe 步骤）
-    if all_steps or "transcribe" in steps:
+    if (all_steps or "transcribe" in steps) and not transcript_done:
         if audio_cache.exists() and has_whisper():
             try:
                 whisper_result = transcribe(
@@ -538,7 +584,8 @@ def analyze_video(
                 result["segments"] = whisper_result["segments"]
                 result["audio_duration"] = whisper_result["duration"]
                 # 缓存转录结果
-                transcript_cache.write_text(json.dumps(whisper_result, ensure_ascii=False, indent=2), encoding="utf-8")
+                _atomic_write(transcript_cache, json.dumps(whisper_result, ensure_ascii=False, indent=2))
+                transcript_done = True
                 _msg(f"转录已缓存: {len(whisper_result['text'])} 字")
             except Exception as e:
                 _msg(f"转录失败: {e}")
@@ -548,7 +595,7 @@ def analyze_video(
             _msg("跳过转录（缺少 faster-whisper）")
 
     # 3. OCR（ocr 步骤）
-    if all_steps or "ocr" in steps:
+    if (all_steps or "ocr" in steps) and not ocr_done:
         frame_dir = cache_dir / "frames"
         frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
         # 加载时间戳缓存
@@ -575,8 +622,9 @@ def analyze_video(
                     pass
         if frame_paths and has_ocr():
             try:
-                result["ocr_results"] = ocr_frames(frame_paths, frame_timestamps)
-                ocr_cache.write_text(json.dumps(result["ocr_results"], ensure_ascii=False, indent=2), encoding="utf-8")
+                result["ocr_results"] = ocr_frames(frame_paths, frame_timestamps, cache_dir / "frame_ocr.json")
+                _atomic_write(ocr_cache, json.dumps(result["ocr_results"], ensure_ascii=False, indent=2))
+                ocr_done = True
                 _msg(f"OCR 已缓存: {len(result['ocr_results'])} 帧")
             except Exception as e:
                 _msg(f"OCR 失败: {e}")
@@ -584,38 +632,33 @@ def analyze_video(
     # 3.5 转录纠错（需要 transcript + ocr + LLM 后端）
     if result["transcript"] and result["ocr_results"]:
         corrected_cache = cache_dir / "transcript_corrected.json"
+        correction_done = False
         if corrected_cache.exists():
             try:
                 result["transcript"] = json.loads(
                     corrected_cache.read_text(encoding="utf-8")
                 ).get("text", result["transcript"])
                 result["corrected"] = True
+                correction_done = True
                 _msg("已加载纠错缓存")
             except Exception:
                 pass
-        else:
+        if not correction_done:
             original = result["transcript"]
             corrected = _correct_transcript(original, result["ocr_results"], cfg)
-            if corrected != original:
-                corrected_cache.write_text(
+            if corrected is not None:
+                _atomic_write(corrected_cache,
                     json.dumps(
                         {"text": corrected, "original": original},
                         ensure_ascii=False, indent=2,
                     ),
-                    encoding="utf-8",
                 )
                 _msg(f"转录纠错完成: {len(original)} → {len(corrected)} 字")
                 result["transcript"] = corrected
                 result["corrected"] = True
 
-    # 清理缓存目录（保留关键帧图片）
-    if all_steps and cache_dir.exists():
-        for f in [audio_cache, transcript_cache, ocr_cache, ts_cache, cache_dir / "transcript_corrected.json"]:
-            if f and f.exists():
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
+    # 保留阶段缓存，重跑和中断后从未完成阶段继续。
+    result["completed"] = transcript_done and ocr_done
 
     return result
 
@@ -731,6 +774,8 @@ def cmd_analyze_video(args) -> int:
             transcript=result.get("transcript", ""),
             ocr_text=ocr_text,
         )
+        xhs_storage.update_crawl_state(conn, f"video-analysis:{args.note_id}", "video-analysis", args.note_id, "",
+                                       "completed" if result.get("completed") else "failed")
 
         # 打印更新内容摘要
         is_partial = steps is not None
