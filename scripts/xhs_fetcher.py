@@ -472,7 +472,7 @@ class Fetcher:
     def _maybe_session_rest(self) -> None:
         if time.time() - self._session_start < self._session_active_duration:
             return
-        rest = self._human_delay(600, 1800)  # 10-30 分钟，对数正态长尾
+        rest = min(300, self._human_delay(0, 300))  # 0-300 秒，限制长尾上限
         print(f"[FETCH] 会话休息 {rest/60:.1f} 分钟（模拟离开）...", file=sys.stderr)
         time.sleep(rest)
         self._session_start = time.time()
