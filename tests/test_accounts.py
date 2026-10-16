@@ -24,14 +24,23 @@ class TestAccount:
         ok, _ = acc.is_available()
         assert ok
 
-    def test_daily_cap(self):
+    @pytest.mark.parametrize("cap,count,available", [
+        (80, 79, True),
+        (80, 80, False),
+        (80, 81, False),
+        (0, 0, True),
+        (0, 80, True),
+        (0, 10000, True),
+    ])
+    def test_daily_cap(self, monkeypatch, cap, count, available):
         from datetime import date
-        from xhs_config import DAILY_HARD_CAP
+        import xhs_config
+        monkeypatch.setattr(xhs_config, "DAILY_HARD_CAP", cap)
         acc = _make_account()
-        acc.daily_count = DAILY_HARD_CAP
+        acc.daily_count = count
         acc.daily_date = date.today().isoformat()  # 确保日期匹配，不会重置
         ok, _ = acc.is_available()
-        assert not ok
+        assert ok is available
 
     def test_cooldown(self):
         acc = _make_account()

@@ -10,7 +10,7 @@ AccountManager 责任：
 - 加载所有可用账号
 - 轮换策略：next_available()（按 last_used 最久未用优先；带冷却跳过）
 - 触发风控：mark_cooldown(seconds) 让账号短期冷却
-- 日抓计数：mark_used()；超 DAILY_HARD_CAP 自动冷却到次日
+- 日抓计数：mark_used()；配置正数 DAILY_HARD_CAP 时，达到上限后次日恢复
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ class Account:
         if self.daily_date != today:
             self.daily_count = 0
             self.daily_date = today
-        if self.daily_count >= xhs_config.DAILY_HARD_CAP:
+        if xhs_config.DAILY_HARD_CAP > 0 and self.daily_count >= xhs_config.DAILY_HARD_CAP:
             return False, f"daily cap {xhs_config.DAILY_HARD_CAP} 已满"
         return True, "ok"
 

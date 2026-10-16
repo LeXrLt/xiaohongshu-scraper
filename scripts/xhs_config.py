@@ -32,8 +32,8 @@ WEB_BASE = "https://www.xiaohongshu.com"
 # ---------------------------------------------------------------------------
 # 核心参数
 # ---------------------------------------------------------------------------
-DAILY_HARD_CAP: int = 80
-IP_DAILY_CAP: int = 80             # 同一 IP 每日总 API 请求上限（所有账号合计）
+DAILY_HARD_CAP: int = 0            # 单账号每日 API 请求上限；0 表示不限制
+IP_DAILY_CAP: int = 0              # IP 每日 API 请求上限；0 表示不限制
 DOM_SEARCH_DAILY_CAP: int = 100   # DOM 浏览器搜索日上限（独立计数，风控风险极低）
 COOKIE_REFRESH_EVERY: int = 20  # 已废弃：实际刷新间隔由 xhs_fetcher._maybe_refresh_cookies() 内部随机决定（15-25 次），此常量仅保留用于 data/config.json 兼容
 IMPERSONATE_PROFILE: str = "chrome136"

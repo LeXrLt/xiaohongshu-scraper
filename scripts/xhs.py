@@ -334,10 +334,11 @@ def cmd_accounts(args: argparse.Namespace) -> int:
     if set_speed:
         print("[INFO] 速度模式已统一为 paranoid，--set-speed 不再需要", file=sys.stderr)
     print(f"=== 共 {len(mgr.accounts)} 个账号 ===")
+    daily_cap = xhs_config.DAILY_HARD_CAP if xhs_config.DAILY_HARD_CAP > 0 else "不限"
     for s in mgr.stats():
         cd = f"cooldown→{s['cooldown_until']}" if s['cooldown_until'] else ""
         acc = mgr.accounts[s['alias']]
-        print(f"  [{s['alias']:15s}] 日抓 {s['daily_count']:3d}/{xhs_config.DAILY_HARD_CAP}  累计 {s['total_calls']:5d}"
+        print(f"  [{s['alias']:15s}] 日抓 {s['daily_count']:3d}/{daily_cap}  累计 {s['total_calls']:5d}"
               f"  460×{s['last_460']}  461×{s['last_461']}  最近用 {s['last_used'] or '从未'}  {cd}")
     return 0
 
@@ -668,9 +669,10 @@ def cmd_health(args: argparse.Namespace) -> int:
         print("  CRIT 无账号（先运行 login）")
         issues.append((2, "无账号"))
     else:
+        daily_cap = xhs_config.DAILY_HARD_CAP if xhs_config.DAILY_HARD_CAP > 0 else "不限"
         for s in mgr.stats():
             cd = " cooldown" if s["cooldown_until"] else ""
-            print(f"  {s['alias']:15s} 日抓 {s['daily_count']:3d}/{xhs_config.DAILY_HARD_CAP}{cd}")
+            print(f"  {s['alias']:15s} 日抓 {s['daily_count']:3d}/{daily_cap}{cd}")
             if s["cooldown_until"]:
                 issues.append((1, f"账号 {s['alias']} 冷却中"))
 

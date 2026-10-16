@@ -568,9 +568,9 @@ class Fetcher:
     def _call(
         self, method: str, api: str, params: dict | None, data: dict | None
     ) -> dict:
-        if self.request_count >= xhs_config.DAILY_HARD_CAP:
+        if xhs_config.DAILY_HARD_CAP > 0 and self.request_count >= xhs_config.DAILY_HARD_CAP:
             raise FatalRiskError(f"达到单账号日抓硬上限 {xhs_config.DAILY_HARD_CAP}，请明日再战")
-        if self.request_count >= xhs_config.IP_DAILY_CAP:
+        if xhs_config.IP_DAILY_CAP > 0 and self.request_count >= xhs_config.IP_DAILY_CAP:
             raise FatalRiskError(f"达到 IP 日抓总上限 {xhs_config.IP_DAILY_CAP}，请明日再战")
         self._maybe_session_rest()
         # Layer 4: 主动轮换检查
@@ -907,7 +907,7 @@ class Fetcher:
     def _dom_search_fallback(self, api: str, data: dict | None) -> dict:
         """搜索 API 返回 -104 时，降级到浏览器 __INITIAL_STATE__ 提取。"""
         # DOM 搜索也计入 IP 日抓总上限
-        if self.request_count >= xhs_config.IP_DAILY_CAP:
+        if xhs_config.IP_DAILY_CAP > 0 and self.request_count >= xhs_config.IP_DAILY_CAP:
             raise FatalRiskError(f"达到 IP 日抓总上限 {xhs_config.IP_DAILY_CAP}，请明日再战")
         # 注意：request_count 已在 _call_raw 中递增，此处不再重复计数
         if not data:
