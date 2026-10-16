@@ -45,6 +45,7 @@ SEARCH_HOURLY_QUOTA: int = int(os.getenv("XHS_SEARCH_HOURLY_QUOTA", "3"))
 
 # 搜索模式: "api" = 优先API调用（需要签名，风控风险更高）, "dom" = 始终走浏览器DOM搜索（更安全）
 SEARCH_MODE: str = os.getenv("XHS_SEARCH_MODE", "dom")
+DOM_BROWSER_MODE: str = os.getenv("XHS_DOM_BROWSER_MODE", "playwright")
 
 # ---------------------------------------------------------------------------
 # Keepalive：Cookie 自动保活

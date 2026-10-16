@@ -13,6 +13,8 @@ playwright install chromium
 ```
 
 Node.js 用于签名脚本，Playwright 用于登录和浏览器搜索；视频分析还需要 ffmpeg。
+浏览器搜索默认使用项目独立的 Playwright Chromium profile，不会关闭或接管本机浏览器。
+需要使用本机浏览器 profile 时，可设置 `XHS_DOM_BROWSER_MODE=real_profile`。
 
 ## 配置
 

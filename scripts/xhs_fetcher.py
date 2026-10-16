@@ -1184,10 +1184,7 @@ if (!window.chrome) window.chrome = {runtime: {}, csi: function(){}, loadTimes: 
 class PlaywrightDomSearch:
     """搜索 API 返回 -104 时，降级到浏览器导航 + __INITIAL_STATE__ 提取。
 
-    双模式启动：
-    1. 真实浏览器模式（优先）：关闭用户 Edge → 用真实 profile 启动 → 有完整
-       cookies + localStorage（含 b1 签名令牌）→ 页面 JS 自身 API 调用不受 -104 影响
-    2. Playwright 降级模式：用 Playwright Chromium + 注入 cookies（best-effort）
+    默认使用项目独立的 Playwright Chromium profile；显式配置时才接管本机浏览器。
     """
 
     @staticmethod
@@ -1225,26 +1222,23 @@ class PlaywrightDomSearch:
         self._stealth_js = self._stealth_for(platform)
         self._cookie_meta = cookie_meta or {}
 
-        # 优先：用真实浏览器 profile（有完整 cookies + localStorage）
-        real = self._find_real_browser()
-        if real:
-            if self._can_debug_profile(real[0], real[1]):
-                try:
-                    self._init_real_profile(real[0], real[1])
-                    return
-                except Exception as e:
-                    print(f"[DOM-SEARCH] 真实浏览器模式失败: {e}，降级到 Playwright",
+        if xhs_config.DOM_BROWSER_MODE == "real_profile":
+            real = self._find_real_browser()
+            if real:
+                if self._can_debug_profile(real[0], real[1]):
+                    try:
+                        self._init_real_profile(real[0], real[1])
+                        return
+                    except Exception as e:
+                        print(f"[DOM-SEARCH] 真实浏览器模式失败: {e}，降级到 Playwright",
+                              file=sys.stderr)
+                else:
+                    print("[DOM-SEARCH] 默认 profile 不适合 Playwright DevTools 调试，使用 Playwright",
                           file=sys.stderr)
-            else:
-                print(
-                    "[DOM-SEARCH] 默认 profile 不适合 Playwright DevTools 调试"
-                    "（Chrome 136+ 限制），"
-                    "跳过真实浏览器，使用 Playwright fallback",
-                    file=sys.stderr,
-                )
+        elif xhs_config.DOM_BROWSER_MODE != "playwright":
+            raise ValueError(f"无效的 XHS_DOM_BROWSER_MODE: {xhs_config.DOM_BROWSER_MODE}")
 
-        # 降级：用 Playwright Chromium + 注入 cookies（best-effort）
-        self._init_playwright_fallback(cookies, headless)
+        self._init_playwright(cookies, headless)
 
     # ------------------------------------------------------------------
     # 浏览器检测与进程管理（复用 xhs_login_native.py 模式）
@@ -1449,12 +1443,11 @@ class PlaywrightDomSearch:
             raise
 
     # ------------------------------------------------------------------
-    # 初始化：Playwright 降级模式
+    # 初始化：Playwright 模式
     # ------------------------------------------------------------------
 
-    def _init_playwright_fallback(self, cookies: dict[str, str],
-                                  headless: bool) -> None:
-        """Playwright Chromium + 注入 cookies（best-effort，缺少 localStorage）。"""
+    def _init_playwright(self, cookies: dict[str, str], headless: bool) -> None:
+        """Playwright Chromium + 注入 cookies。"""
         from playwright.sync_api import sync_playwright  # type: ignore
         self._pw = sync_playwright().start()
         profile = xhs_config.DATA_DIR / "pw_profile_dom_search"
@@ -1478,12 +1471,12 @@ class PlaywrightDomSearch:
         self._page.goto(xhs_config.WEB_BASE + "/",
                         wait_until="domcontentloaded")
         self._page.wait_for_timeout(3000)
-        self._mode = "playwright_fallback"
-        print("[DOM-SEARCH] 降级到 Playwright 模式（缺少 localStorage，效果有限）",
+        self._mode = "playwright"
+        print("[DOM-SEARCH] 已启动 Playwright Chromium",
               file=sys.stderr)
 
     # ------------------------------------------------------------------
-    # Cookie 注入（仅降级模式需要）
+    # Cookie 注入（Playwright 模式）
     # ------------------------------------------------------------------
 
     def _inject_cookies(self, cookies: dict[str, str],
