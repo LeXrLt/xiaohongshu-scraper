@@ -1468,11 +1468,14 @@ class PlaywrightDomSearch:
             stealth_sync(self._page)
         except ImportError:
             pass
-        self._page.goto(xhs_config.WEB_BASE + "/",
-                        wait_until="domcontentloaded")
+        print("[DOM-SEARCH] Playwright Chromium 已启动，正在打开首页", file=sys.stderr)
+        response = self._page.goto(xhs_config.WEB_BASE + "/",
+                                   wait_until="commit", timeout=30000)
+        if response is None or response.status >= 400:
+            raise RuntimeError(f"首页导航失败：HTTP {response.status if response else '无响应'}")
         self._page.wait_for_timeout(3000)
         self._mode = "playwright"
-        print("[DOM-SEARCH] 已启动 Playwright Chromium",
+        print(f"[DOM-SEARCH] Playwright 首页已响应：HTTP {response.status} {self._page.url}",
               file=sys.stderr)
 
     # ------------------------------------------------------------------
@@ -1522,49 +1525,55 @@ class PlaywrightDomSearch:
 
         # 拦截搜索 API 响应（真实浏览器模式下，页面 JS 会调搜索 API）
         api_data: list[dict] = []
+        api_response_seen = False
 
         def _on_response(resp):
+            nonlocal api_response_seen
             if "/search/notes" in resp.url and resp.status == 200:
                 try:
                     body = resp.json()
-                    items = (body.get("data") or {}).get("items") or []
+                    data = body.get("data") or {}
+                    if body.get("success") is not False and "items" in data:
+                        api_response_seen = True
+                    items = data.get("items") or []
                     if items:
                         api_data.extend(items)
                 except Exception:
                     pass
 
         self._page.on("response", _on_response)
-
-        # 导航到搜索页
-        self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-        # 等待页面 JS 加载数据（真实模式需要更久，让 API 调用完成）
-        wait_ms = 6000 + random.randint(1000, 3000) if self._mode == "real_profile" \
-                  else 2000 + random.randint(500, 1500)
-        self._page.wait_for_timeout(wait_ms)
-
-        # 移除响应监听器
         try:
-            self._page.remove_listener("response", _on_response)
-        except Exception:
-            pass
+            response = self._page.goto(url, wait_until="commit", timeout=30000)
+            if response is None or response.status >= 400:
+                raise RuntimeError(f"搜索页导航失败：HTTP {response.status if response else '无响应'}")
 
-        # 优先使用拦截到的 API 数据（最完整，含 xsec_token）
-        if api_data:
-            print(f"[DOM-SEARCH] 拦截到 {len(api_data)} 条 API 搜索结果",
-                  file=sys.stderr)
-            return {"items": api_data,
-                    "has_more": len(api_data) >= 10}
+            wait_ms = 6000 + random.randint(1000, 3000) if self._mode == "real_profile" \
+                      else 2000 + random.randint(500, 1500)
+            for delay in (wait_ms, 5000, 5000):
+                self._page.wait_for_timeout(delay)
+                if api_data:
+                    print(f"[DOM-SEARCH] 拦截到 {len(api_data)} 条 API 搜索结果",
+                          file=sys.stderr)
+                    return {"items": api_data, "has_more": len(api_data) >= 10}
 
-        # 降级：从 __INITIAL_STATE__ 提取
-        raw = self._extract_state_js() or self._extract_state_html()
-        if raw:
-            result = self._parse_search_state(raw)
-            if result.get("items"):
-                return result
+                raw = self._extract_state_js() or self._extract_state_html()
+                if raw:
+                    result = self._parse_search_state(raw)
+                    if result.get("items"):
+                        return result
 
-        # 最后兜底：从 DOM 提取 note_id
-        return self._extract_from_dom()
+                result = self._extract_from_dom()
+                if result.get("items"):
+                    return result
+                if api_response_seen:
+                    return {"items": [], "has_more": False}
+
+            raise RuntimeError("搜索页未加载出结果，暂停以避免将未加载页面记录为空列表")
+        finally:
+            try:
+                self._page.remove_listener("response", _on_response)
+            except Exception:
+                pass
 
     def _extract_state_js(self) -> dict | None:
         """通过 page.evaluate 提取 __INITIAL_STATE__。"""
