@@ -1,4 +1,4 @@
-// Replace this with the production origin before publishing for key-only setup.
+// Remote deployments set MERCHANTS_API_URL; local deployments use this default.
 export const DEFAULT_API_URL = 'http://localhost:8000';
 
 export class ApiError extends Error {}

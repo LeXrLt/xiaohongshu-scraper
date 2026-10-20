@@ -6,13 +6,7 @@
 
 ## 安装到 Codex
 
-发布到 npm 且内置正式 API 地址后：
-
-```bash
-codex mcp add merchants --env MERCHANTS_API_KEY=xxx -- npx -y merchants-mcp
-```
-
-**当前尚未发布到 npm，默认后端为 `http://localhost:8000`。** 公网 API 地址尚未确定，发布前需在 `src/client.js` 的 `DEFAULT_API_URL` 填入正式 HTTPS 地址。如果用户连接其他部署，可以覆盖：
+安装时配置服务管理员提供的 API 地址和密钥，将下面的地址替换为实际部署的 HTTPS 地址：
 
 ```bash
 codex mcp add merchants \
@@ -20,6 +14,8 @@ codex mcp add merchants \
   --env MERCHANTS_API_URL=https://your-api.example.com \
   -- npx -y merchants-mcp
 ```
+
+默认后端为 `http://localhost:8000`，适用于本地部署；连接远程服务需设置 `MERCHANTS_API_URL`。
 
 `MERCHANTS_API_KEY` 是后端 `.env` 中 `API_AUTH_KEY` 的值，由服务管理员提供。密钥只保存在 MCP 进程内，不作为工具参数或工具结果暴露。包不会自动读取调用者当前工作目录的 `.env`。
 
@@ -102,7 +98,7 @@ npm test
 npm pack --dry-run
 ```
 
-发布前填好并验证正式 `DEFAULT_API_URL`，确认拥有 npm 包名 `merchants-mcp` 的发布权限，并按项目计划确定版本和许可证（当前保留 `UNLICENSED`，没有擅自授予开源许可）。然后登录 npm 并发布：
+发布前确认版本、API 配置说明以及 npm 包名 `merchants-mcp` 的发布权限。当前许可证为 `UNLICENSED`。然后登录 npm 并发布：
 
 ```bash
 npm login
