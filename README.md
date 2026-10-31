@@ -60,6 +60,9 @@ python scripts/query_db.py stats
 python scripts/merchant.py init
 python scripts/merchant.py extract --limit 10
 python scripts/merchant.py promote
+# Ticketmaster SG 未开始演唱会
+python scripts/ticketmaster.py crawl --max-pages 20
+python scripts/ticketmaster.py list --limit 100
 # 预览重复商户；仅规范化同名或已有明确别名关系会匹配
 python scripts/merchant.py dedupe
 # 先备份受影响商户和全部来源关系，再执行合并（备份文件必须不存在）
@@ -92,6 +95,28 @@ python scripts/merchant.py dedupe --backup data/merchant-dedupe-backup.json
 商户候选只晋级尚未处理或发生变化的记录；同名或明确别名对应的商户复用现有身份，
 匹配多个商户时进入人工复核。查询、统计分析和导出仍按当前数据生成结果；导出是
 可重复生成的文件，不参与抓取任务游标。
+
+### Ticketmaster SG 演唱会
+
+`python scripts/ticketmaster.py crawl` 使用 Playwright 打开
+`https://ticketmaster.sg/categories/concerts`，先完成网站的浏览器反爬验证，再读取列表
+分页和详情页内嵌的 `calendarEvents` JSON。详情页直接提供艺人、场馆、每场演出时间和
+`ticket/area/...` 购票链接，因此核心入库不调用 AI；这样不会让模型改写购票事实。活动
+信息写入 `ticketmaster_concerts`，每个日期/场次和购票链接写入
+`ticketmaster_concert_occurrences`，均保留原始 JSON 便于复核。
+
+浏览器上下文每次抓取都会新建，不复用本机 Cookie；启动时会把 UA 主版本与实际
+Chromium 对齐，并使用新加坡语言和时区。详情页之间默认间隔 1.5–3 秒，因为 Ticketmaster
+的 EPS 验证会把连续快速导航识别为异常。无桌面环境时可以继续使用无头模式；若仍出现
+验证页，建议在有桌面的机器上加 `--headed`，让验证脚本完成后再继续抓取。
+
+抓取只写入当前时间之后的场次；已入库场次开始后会标记为 `started`，`list` 默认只返回
+`upcoming`。活动页按 Ticketmaster 活动代码去重，场次按详情页的 event id 去重。任务
+进度复用 `xhs_crawl_state` 的 `ticketmaster:concerts`，在页内保存详情索引；进程中断后
+会重放当前详情页并继续；上一轮完成后再次运行会从第一页刷新，以发现新活动，重复数据
+由数据库幂等键合并。若要丢弃尚未完成的断点并立即从第一页开始，可使用 `--restart`。
+遇到需要人工完成的浏览器验证时可加 `--headed`；若系统找不到浏览器，可设置
+`TICKETMASTER_CHROMIUM_PATH` 指向 Chromium/Chrome 可执行文件。
 
 商户不设核实状态。升级前的本地数据库应先备份并完成一次性数据迁移，再停用旧版爬虫；新版不再读取或创建 `data/xhs.db`。
 
@@ -163,6 +188,7 @@ python scripts/xhs.py crawl-config --max-pages 2
 
 ```
 ├── scripts/xhs.py         # 爬虫 CLI
+├── scripts/ticketmaster.py # Ticketmaster SG 演唱会抓取与查询 CLI
 ├── scripts/merchant.py    # 商户表初始化、Agent 抽取与候选校验
 ├── scripts/merchant_prompt.md # 商户 Agent 抽取提示词
 ├── database.py            # 共用 PostgreSQL 连接与表结构初始化

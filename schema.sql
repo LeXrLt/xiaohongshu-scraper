@@ -224,6 +224,60 @@ CREATE INDEX IF NOT EXISTS idx_merchant_tag_links_tag ON merchant_tag_links(tag_
 CREATE INDEX IF NOT EXISTS idx_merchant_notes_note ON merchant_notes(note_id);
 CREATE INDEX IF NOT EXISTS idx_merchant_candidates_note ON merchant_extraction_candidates(note_id);
 
+-- Ticketmaster SG 演唱会：页面本身已经提供结构化演出和艺人字段，不经过商户索引。
+-- 主表按活动页保存艺人/演唱会信息；场次表按 Ticketmaster 的 event id 保存日期和购票链接。
+CREATE TABLE IF NOT EXISTS ticketmaster_concerts (
+    concert_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT 'ticketmaster.sg',
+    title TEXT NOT NULL DEFAULT '',
+    artist_name TEXT NOT NULL DEFAULT '',
+    artist_id TEXT NOT NULL DEFAULT '',
+    promoter TEXT NOT NULL DEFAULT '',
+    category_name TEXT NOT NULL DEFAULT 'Concerts',
+    venue_name TEXT NOT NULL DEFAULT '',
+    city TEXT NOT NULL DEFAULT 'Singapore',
+    country TEXT NOT NULL DEFAULT 'SG',
+    event_url TEXT NOT NULL DEFAULT '',
+    image_url TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    source_hash TEXT NOT NULL DEFAULT '',
+    raw_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended', 'cancelled', 'unknown')),
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS ticketmaster_concert_occurrences (
+    occurrence_id TEXT PRIMARY KEY,
+    concert_id TEXT NOT NULL REFERENCES ticketmaster_concerts(concert_id) ON DELETE CASCADE,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    display_date TEXT NOT NULL DEFAULT '',
+    venue_name TEXT NOT NULL DEFAULT '',
+    ticket_url TEXT NOT NULL DEFAULT '',
+    ticket_status TEXT NOT NULL DEFAULT '',
+    source_hash TEXT NOT NULL DEFAULT '',
+    raw_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'started', 'cancelled', 'unknown')),
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (concert_id, source_event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticketmaster_concerts_artist
+    ON ticketmaster_concerts(artist_name);
+CREATE INDEX IF NOT EXISTS idx_ticketmaster_concerts_status
+    ON ticketmaster_concerts(status);
+CREATE INDEX IF NOT EXISTS idx_ticketmaster_occurrences_start
+    ON ticketmaster_concert_occurrences(start_at);
+CREATE INDEX IF NOT EXISTS idx_ticketmaster_occurrences_upcoming
+    ON ticketmaster_concert_occurrences(status, start_at);
+CREATE INDEX IF NOT EXISTS idx_ticketmaster_occurrences_concert
+    ON ticketmaster_concert_occurrences(concert_id);
+
 -- 阅读器配置：单实例设置，关键词/博主用 JSON 数组保存，cookie 由 API 统一读取。
 CREATE TABLE IF NOT EXISTS reader_config (
     id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
