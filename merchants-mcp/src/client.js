@@ -100,4 +100,6 @@ export class MerchantsClient {
   tags(params) { return this.get('/api/merchant-tags', params); }
   search(params) { return this.get('/api/merchants', params); }
   detail(id, params) { return this.get(`/api/merchants/${encodeURIComponent(id)}`, params); }
+  upcomingConcerts(params) { return this.get('/api/concerts/upcoming', params); }
+  concertDetail(id, params) { return this.get(`/api/concerts/${encodeURIComponent(id)}`, params); }
 }

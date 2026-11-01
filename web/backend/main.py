@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager, closing
+from datetime import date
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
@@ -21,12 +22,18 @@ from reader_config import (
     read_config,
     write_config,
 )
+from database import connect
 
 load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_auth_settings()  # Refuse to start with missing or invalid authentication config.
+    # Docker's init scripts only run for a new PostgreSQL volume.  Run the
+    # project's idempotent DDL once at API startup so existing volumes receive
+    # newly added tables such as the Ticketmaster tables.
+    conn = connect(initialize=True)
+    conn.close()
     yield
 
 
@@ -418,6 +425,125 @@ def get_merchant(
         result["notes_page"] = notes_page
         result["notes_page_size"] = notes_page_size
         result["notes_has_more"] = notes_page_size is not None and notes_page * notes_page_size < counts["notes_total"]
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _db_error(exc) from exc
+
+
+@data_router.get("/api/concerts/upcoming")
+def list_upcoming_concerts(
+    keyword: str | None = Query(default=None, max_length=120),
+    artist: str | None = Query(default=None, max_length=120),
+    venue: str | None = Query(default=None, max_length=120),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    page: int = Query(default=1, ge=1, le=10000),
+    page_size: int = Query(default=20, ge=1, le=50),
+) -> dict[str, Any]:
+    """返回 Ticketmaster 中尚未开始的演唱会场次，按开始时间升序。"""
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(status_code=422, detail="from_date 不能晚于 to_date")
+    clauses = ["c.status = 'active'", "o.status = 'upcoming'", "o.start_at > CURRENT_TIMESTAMP"]
+    params: list[Any] = []
+    if keyword and keyword.strip():
+        value = f"%{keyword.strip()}%"
+        clauses.append("(c.title ILIKE %s OR c.artist_name ILIKE %s OR c.venue_name ILIKE %s OR o.venue_name ILIKE %s OR c.promoter ILIKE %s OR c.description ILIKE %s)")
+        params.extend([value] * 6)
+    if artist and artist.strip():
+        clauses.append("c.artist_name ILIKE %s")
+        params.append(f"%{artist.strip()}%")
+    if venue and venue.strip():
+        clauses.append("(c.venue_name ILIKE %s OR o.venue_name ILIKE %s)")
+        params.extend([f"%{venue.strip()}%"] * 2)
+    if from_date:
+        clauses.append("o.start_at >= (%s::date AT TIME ZONE 'Asia/Singapore')")
+        params.append(from_date)
+    if to_date:
+        clauses.append("o.start_at < ((%s::date + INTERVAL '1 day') AT TIME ZONE 'Asia/Singapore')")
+        params.append(to_date)
+    where = " AND ".join(clauses)
+    offset = (page - 1) * page_size
+    try:
+        with closing(get_connection()) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM ticketmaster_concerts c
+                JOIN ticketmaster_concert_occurrences o ON o.concert_id = c.concert_id
+                WHERE {where}
+                """, params,
+            )
+            total = int(cur.fetchone()["total"])
+            cur.execute(
+                f"""
+                SELECT c.concert_id, c.title, c.artist_name, c.artist_id, c.promoter,
+                       c.category_name, c.venue_name, c.city, c.country,
+                       c.event_url, c.image_url, c.description,
+                       o.occurrence_id, o.source_event_id, o.start_at, o.end_at,
+                       o.display_date, o.venue_name AS occurrence_venue_name,
+                       o.ticket_url, o.ticket_status, o.status AS occurrence_status
+                FROM ticketmaster_concerts c
+                JOIN ticketmaster_concert_occurrences o ON o.concert_id = c.concert_id
+                WHERE {where}
+                ORDER BY o.start_at ASC, c.artist_name ASC, c.concert_id ASC, o.occurrence_id ASC
+                LIMIT %s OFFSET %s
+                """, [*params, page_size, offset],
+            )
+            items = [dict(row) for row in cur.fetchall()]
+        return {"items": items, "page": page, "page_size": page_size, "total": total}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _db_error(exc) from exc
+
+
+@data_router.get("/api/concerts/{concert_id}")
+def get_concert(
+    concert_id: str,
+    occurrences_page: int = Query(default=1, ge=1, le=10000),
+    occurrences_page_size: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    """返回 Ticketmaster 活动详情和其全部（或分页）场次。"""
+    try:
+        with closing(get_connection()) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT concert_id, source, title, artist_name, artist_id, promoter,
+                       category_name, venue_name, city, country, event_url, image_url,
+                       description, status, first_seen_at, last_seen_at, updated_at
+                FROM ticketmaster_concerts
+                WHERE concert_id = %s
+                """, (concert_id,),
+            )
+            concert = cur.fetchone()
+            if not concert:
+                raise HTTPException(status_code=404, detail="Concert not found")
+            cur.execute(
+                "SELECT COUNT(*) AS total FROM ticketmaster_concert_occurrences WHERE concert_id = %s",
+                (concert_id,),
+            )
+            occurrences_total = int(cur.fetchone()["total"])
+            cur.execute(
+                """
+                SELECT occurrence_id, source_event_id, start_at, end_at, display_date,
+                       venue_name, ticket_url, ticket_status, status, first_seen_at,
+                       last_seen_at, updated_at
+                FROM ticketmaster_concert_occurrences
+                WHERE concert_id = %s
+                ORDER BY start_at ASC, occurrence_id ASC
+                LIMIT %s OFFSET %s
+                """,
+                (concert_id, occurrences_page_size, (occurrences_page - 1) * occurrences_page_size),
+            )
+            occurrences = [dict(row) for row in cur.fetchall()]
+        result = dict(concert)
+        result["occurrences"] = occurrences
+        result["occurrences_page"] = occurrences_page
+        result["occurrences_page_size"] = occurrences_page_size
+        result["occurrences_total"] = occurrences_total
+        result["occurrences_has_more"] = occurrences_page * occurrences_page_size < occurrences_total
         return result
     except HTTPException:
         raise

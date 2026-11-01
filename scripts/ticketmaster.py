@@ -742,19 +742,24 @@ class TicketmasterBrowser:
         return self._wait_ready(marker)
 
     def fetch_listing_fragment(self, offset: str, _attempt: int = 0) -> str:
-        if self.page is None:
+        if self.page is None or self._context is None:
             raise RuntimeError("浏览器尚未启动")
         url = f"{MORE_URL}?{urlencode({'type': 'card', 'offset': offset})}"
-        value = self.page.evaluate(
-            """async (url) => {
-                const response = await fetch(url, {credentials: 'include'});
-                return {status: response.status, text: await response.text()};
-            }""",
-            url,
-        )
-        if not isinstance(value, dict) or int(value.get("status", 0)) >= 400:
+        # Use the context request client instead of page.evaluate(fetch(...)).
+        # The latter can fail when Ticketmaster is navigating or changes its
+        # page CSP/CORS policy; context requests still share browser cookies.
+        try:
+            response = self._context.request.get(url, timeout=self.timeout_ms)
+            status = response.status
+            text = response.text()
+        except Exception as exc:
+            if _attempt >= 2:
+                raise RuntimeError(f"Ticketmaster 分页请求失败: {url}: {exc}") from exc
+            self.fetch_page(CONCERTS_URL, marker="eventContainer")
+            return self.fetch_listing_fragment(offset, _attempt + 1)
+        if status >= 400:
             raise RuntimeError(f"Ticketmaster 分页请求失败: {url}")
-        text = str(value.get("text") or "")
+        text = str(text or "")
         if "Your Browsing Activity Has Been Paused" in text or "identify" in text[:500]:
             if _attempt >= 2:
                 raise RuntimeError(f"Ticketmaster 分页反爬验证未完成: {url}")

@@ -1,7 +1,7 @@
 {
   "name": "merchants-mcp",
   "version": "0.1.0",
-  "description": "MCP server for finding restaurants, massage, clinics and local services with source-backed merchant recommendations.",
+  "description": "MCP server for source-backed merchant recommendations and Ticketmaster SG concert discovery.",
   "type": "module",
   "bin": {
     "merchants-mcp": "./src/index.js"
@@ -19,7 +19,7 @@
     "check": "node --check src/index.js && node --check src/client.js && node --check src/server.js",
     "prepublishOnly": "npm run check && npm test"
   },
-  "keywords": ["mcp", "model-context-protocol", "merchants", "restaurants", "codex"],
+  "keywords": ["mcp", "model-context-protocol", "merchants", "restaurants", "concerts", "ticketmaster", "codex"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LeXrLt/xiaohongshu-scraper.git",

@@ -44,6 +44,26 @@ def merchant_client(db_conn, monkeypatch):
     db_conn.execute("""INSERT INTO merchant_tag_links (merchant_id, tag_id, source_note_id) VALUES
         ('m1', 'sea', 'n1'), ('m1', 'sea', 'n2'), ('m1', 'quiet', 'n1'),
         ('m2', 'quiet', 'n1'), ('m1', 'old', 'n1')""")
+    db_conn.execute("""INSERT INTO ticketmaster_concerts
+        (concert_id, title, artist_name, artist_id, promoter, category_name, venue_name,
+         city, country, event_url, description, status)
+        VALUES
+        ('c1', 'One Live', 'Singer One', 'artist-1', 'Promoter', 'Concerts',
+         'The Star Theatre', 'Singapore', 'SG', 'https://ticketmaster.sg/activity/detail/c1',
+         'About Singer One', 'active'),
+        ('c2', 'Two Live', 'Singer Two', 'artist-2', 'Promoter 2', 'Concerts',
+         'Indoor Stadium', 'Singapore', 'SG', 'https://ticketmaster.sg/activity/detail/c2',
+         'About Singer Two', 'active')""")
+    db_conn.execute("""INSERT INTO ticketmaster_concert_occurrences
+        (occurrence_id, concert_id, source_event_id, start_at, display_date, venue_name,
+         ticket_url, ticket_status, status)
+        VALUES
+        ('o1', 'c1', 'event-1', '2099-11-02 20:00:00+08', '02 Nov 2099 08:00 pm',
+         'The Star Theatre', 'https://ticketmaster.sg/ticket/1', 'on sale', 'upcoming'),
+        ('o2', 'c1', 'event-2', '2099-11-03 20:00:00+08', '03 Nov 2099 08:00 pm',
+         'The Star Theatre', 'https://ticketmaster.sg/ticket/2', 'on sale', 'upcoming'),
+        ('o3', 'c2', 'event-3', '2099-12-10 20:00:00+08', '10 Dec 2099 08:00 pm',
+         'Indoor Stadium', 'https://ticketmaster.sg/ticket/3', 'on sale', 'upcoming')""")
     db_conn.commit()
     monkeypatch.setenv("API_AUTH_KEY", "test-merchant-api-0123456789abcdef0123456789")
     auth.get_auth_settings.cache_clear()
@@ -130,6 +150,28 @@ def test_details_paginate_sources_and_preserve_unpaginated_frontend_behavior(mer
     assert last['notes'][0]['content'] == '海湾餐厅有窗边座位。'
     assert last['notes_has_more'] is False
     assert merchant_client.get('/api/merchants/missing').status_code == 404
+
+
+def test_upcoming_concerts_filter_and_details(merchant_client):
+    response = merchant_client.get('/api/concerts/upcoming', params={
+        'artist': 'Singer One', 'from_date': '2099-11-01', 'to_date': '2099-11-30', 'page_size': 1,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data['total'] == 2
+    assert len(data['items']) == 1
+    assert data['items'][0]['concert_id'] == 'c1'
+    assert data['items'][0]['occurrence_venue_name'] == 'The Star Theatre'
+    assert data['items'][0]['start_at'].startswith('2099-11-02')
+    detail = merchant_client.get('/api/concerts/c1', params={'occurrences_page_size': 1}).json()
+    assert detail['artist_name'] == 'Singer One'
+    assert detail['occurrences_total'] == 2
+    assert detail['occurrences_has_more'] is True
+    assert detail['occurrences'][0]['ticket_url'].endswith('/1')
+    assert merchant_client.get('/api/concerts/missing').status_code == 404
+    assert merchant_client.get('/api/concerts/upcoming', params={
+        'from_date': '2099-12-01', 'to_date': '2099-11-01',
+    }).status_code == 422
 
 
 @pytest.mark.parametrize('path,params', [

@@ -31,6 +31,15 @@ test('stdio exposes the complete discovery/search/source workflow through authen
       res.end(JSON.stringify({ merchant_id: 'm1', canonical_name: '海湾餐厅', note_count: 2, notes_total: 2,
         notes_has_more: true, notes: [{ note_id: 'n1', title: '探店', content: '海'.repeat(12001),
           evidence_text: '海湾餐厅有海景。', note_url: 'https://example.com/n1', published_at: '2026-10-01' }] }));
+    } else if (req.url.startsWith('/api/concerts/upcoming')) {
+      res.end(JSON.stringify({ items: [{ concert_id: 'c1', title: 'One Live', artist_name: 'Singer One',
+        venue_name: 'The Star Theatre', start_at: '2026-11-02T12:00:00Z', occurrence_id: 'o1' }],
+        total: 1, page: 1, page_size: 20 }));
+    } else if (req.url.startsWith('/api/concerts/c1')) {
+      res.end(JSON.stringify({ concert_id: 'c1', title: 'One Live', artist_name: 'Singer One',
+        description: 'About Singer One', occurrences_total: 1, occurrences_has_more: false,
+        occurrences: [{ occurrence_id: 'o1', start_at: '2026-11-02T12:00:00Z',
+          ticket_url: 'https://ticketmaster.sg/ticket/1' }] }));
     } else if (req.url.startsWith('/api/merchants?')) {
       res.end(JSON.stringify({ items: [{ merchant_id: 'm1', canonical_name: '海湾餐厅', tags: [{ tag_id: 'sea' }] }],
         total: 1, page: 1, page_size: 10 }));
@@ -49,9 +58,11 @@ test('stdio exposes the complete discovery/search/source workflow through authen
   t.after(() => mcp.close());
   await mcp.connect(transport);
   assert.match(mcp.getInstructions(), /先调用 list_merchant_categories/);
+  assert.match(mcp.getInstructions(), /使用 list_upcoming_concerts/);
   const tools = (await mcp.listTools()).tools;
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-    'get_merchant_details', 'list_merchant_categories', 'list_merchant_tags', 'search_merchants',
+    'get_concert_details', 'get_merchant_details', 'list_merchant_categories', 'list_merchant_tags',
+    'list_upcoming_concerts', 'search_merchants',
   ]);
   for (const tool of tools) assert.equal(tool.annotations.readOnlyHint, true);
   const call = async (name, args = {}) => {
@@ -70,6 +81,11 @@ test('stdio exposes the complete discovery/search/source workflow through authen
   assert.deepEqual(detail.notes[0].truncated_fields, ['content']);
   assert.equal(detail.notes[0].note_url, 'https://example.com/n1');
   assert.equal(detail.notes_has_more, true);
+  const concerts = await call('list_upcoming_concerts', { artist: 'Singer', from_date: '2026-11-01', to_date: '2026-11-30' });
+  assert.equal(concerts.items[0].concert_id, 'c1');
+  const concert = await call('get_concert_details', { concert_id: 'c1' });
+  assert.equal(concert.artist_name, 'Singer One');
+  assert.equal(concert.occurrences[0].ticket_url, 'https://ticketmaster.sg/ticket/1');
   const unknown = await mcp.callTool({ name: 'search_merchants', arguments: { category_id: 'guessed' } });
   assert.equal(unknown.isError, true);
   assert.match(unknown.content[0].text, /分类不存在/);
@@ -80,6 +96,8 @@ test('stdio exposes the complete discovery/search/source workflow through authen
   assert.equal(requests.filter((r) => r.url === '/api/auth/token').length, 1);
   const search = requests.find((r) => r.url.startsWith('/api/merchants?'));
   assert.equal(new URL(search.url, 'http://test').searchParams.get('tag_ids'), 'sea');
+  const concertSearch = requests.find((r) => r.url.startsWith('/api/concerts/upcoming?'));
+  assert.equal(new URL(concertSearch.url, 'http://test').searchParams.get('artist'), 'Singer');
   assert.ok(requests.find((r) => r.url.includes('notes_page_size=5')));
   assert.equal(requests.filter((r) => r.url.startsWith('/api/merchants?')).length, 1);
   assert.equal(stderr, '');
