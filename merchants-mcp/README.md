@@ -39,7 +39,7 @@ codex mcp add merchants \
   -- node /absolute/path/xiaohongshu-scraper/merchants-mcp/src/index.js
 ```
 
-也可以先 `npm pack --pack-destination /tmp`，再用 `npx -y --package /tmp/merchants-mcp-0.1.0.tgz merchants-mcp` 测试安装包的命令入口。
+也可以先 `npm pack --pack-destination /tmp`，再用 `npx -y --package /tmp/merchants-mcp-0.1.1.tgz merchants-mcp` 测试安装包的命令入口。
 
 ## 推荐流程
 
