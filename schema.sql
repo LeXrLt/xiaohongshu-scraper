@@ -299,3 +299,27 @@ ALTER TABLE xhs_comments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT
 
 -- 移除旧版商户核实状态，重复执行时跳过已删除的字段。
 ALTER TABLE merchants DROP COLUMN IF EXISTS status;
+
+-- 推送记录表：通用多态记录库中商户、演唱会等实体的推送状态。
+-- 规则：若表中没有某个实体的记录（或当前渠道下无记录），说明该实体尚未推送过。
+CREATE TABLE IF NOT EXISTS push_records (
+    record_id BIGSERIAL PRIMARY KEY,
+    entity_type TEXT NOT NULL,                  -- 'merchant', 'ticketmaster_concert', 'ticketmaster_occurrence' 等
+    entity_id TEXT NOT NULL,                    -- 实体主键 (merchant_id, concert_id 等)
+    channel TEXT NOT NULL DEFAULT 'default',    -- 推送渠道标识，如 'default', 'feishu', 'wechat_work', 'webhook'
+    push_status TEXT NOT NULL DEFAULT 'pending' CHECK (push_status IN ('pending', 'success', 'failed', 'skipped')),
+    content_hash TEXT DEFAULT '',               -- 推送时实体的内容哈希（用于检测内容更新）
+    entity_updated_at TIMESTAMPTZ,              -- 对应实体自身的更新时间
+    last_pushed_at TIMESTAMPTZ,                 -- 最近一次成功推送时间
+    retry_count INTEGER NOT NULL DEFAULT 0,     -- 推送/重试次数
+    error_message TEXT DEFAULT '',              -- 异常/失败信息
+    payload_snapshot JSONB DEFAULT '{}'::jsonb, -- 推送内容摘要/快照
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (entity_type, entity_id, channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_records_lookup
+    ON push_records (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_push_records_status
+    ON push_records (channel, push_status);

@@ -147,19 +147,19 @@ class MerchantAgentConfig:
                 raise ValueError(f"{name} 必须是整数，当前值为 {raw!r}") from exc
 
         provider = value("MERCHANT_AGENT_PROVIDER", value("AGENT_PROVIDER", "openai"))
-        api_key = value("MERCHANT_AGENT_API_KEY", value("OPENAI_API_KEY"))
+        api_key = value("MERCHANT_AGENT_API_KEY", value("AGENT_API_KEY", value("OPENAI_API_KEY")))
         base_url = value(
             "MERCHANT_AGENT_BASE_URL",
-            value("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            value("AGENT_BASE_URL", value("OPENAI_BASE_URL", "https://api.openai.com/v1")),
         )
-        model = value("MERCHANT_AGENT_MODEL", value("OPENAI_MODEL", "gpt-4o-mini"))
+        model = value("MERCHANT_AGENT_MODEL", value("AGENT_MODEL", value("OPENAI_MODEL", "gpt-4o-mini")))
         return cls(
             provider=provider,
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             model=model,
-            timeout_s=integer("MERCHANT_AGENT_TIMEOUT_S", 60),
-            retries=integer("MERCHANT_AGENT_RETRIES", 2, minimum=0),
+            timeout_s=integer("MERCHANT_AGENT_TIMEOUT_S", integer("AGENT_TIMEOUT_S", 60)),
+            retries=integer("MERCHANT_AGENT_RETRIES", integer("AGENT_RETRIES", 2, minimum=0), minimum=0),
             batch_size=integer("MERCHANT_AGENT_BATCH_SIZE", 5),
             max_notes=integer("MERCHANT_AGENT_MAX_NOTES", 100),
             extractor_version=value("MERCHANT_EXTRACTOR_VERSION", "v1"),
