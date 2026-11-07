@@ -203,6 +203,21 @@ def fetch_unpushed_data(
     return enriched_merchants, enriched_concerts
 
 
+def _group_concerts_by_region(
+    concerts: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """按票务平台来源归类演唱会，未知来源保留在其他演出中。"""
+    groups = {"香港": [], "新加坡": [], "其他演出": []}
+    source_to_region = {
+        "hkt.hkticketing.com": "香港",
+        "ticketmaster.sg": "新加坡",
+    }
+    for concert in concerts:
+        source = str(concert.get("source") or "").strip().lower()
+        groups[source_to_region.get(source, "其他演出")].append(concert)
+    return groups
+
+
 def _build_agent_prompt(
     merchants: list[dict[str, Any]],
     concerts: list[dict[str, Any]],
@@ -219,7 +234,7 @@ def _build_agent_prompt(
         "3. 结构分明（使用飞书友好易读的 Markdown 语法）：\n"
         "   - 导语：1~2句话热情概括本次更新亮点；\n"
         "   - 🍽️ 新增精选商户（如有）：每家店用 2~3 行精炼推荐；\n"
-        "   - 🎤 演出与演唱会动态（如有）：突出重点艺人与场次时间；\n"
+        "   - 🎤 演出与演唱会动态（如有）：必须按地区分组，依次使用“## 香港”“## 新加坡”标题；没有数据的地区不要输出空标题；未知来源放在“## 其他演出”下。每组突出重点艺人与场次时间；\n"
         "   - 💡 情报官贴士：1~2条贴心的游玩/预约/抢票建议。\n"
         "4. 篇幅精炼：控制整体长度，切忌冗长罗嗦。如果某一类别数据为空，则不需要展示对应模块。"
     )
@@ -230,8 +245,14 @@ def _build_agent_prompt(
         context_parts.append(json.dumps(merchants, ensure_ascii=False, indent=2, default=str))
 
     if concerts:
-        context_parts.append(f"### 最新收录演唱会/演出（共 {len(concerts)} 场）：")
-        context_parts.append(json.dumps(concerts, ensure_ascii=False, indent=2, default=str))
+        concert_groups = _group_concerts_by_region(concerts)
+        context_parts.append("### 最新收录演唱会/演出（按地区分组）：")
+        for region in ("香港", "新加坡", "其他演出"):
+            region_concerts = concert_groups[region]
+            if not region_concerts:
+                continue
+            context_parts.append(f"#### {region}（共 {len(region_concerts)} 场）")
+            context_parts.append(json.dumps(region_concerts, ensure_ascii=False, indent=2, default=str))
 
     user_prompt = (
         "以下是本次数据库新增的未推送数据，请按照要求生成一份精美、接地气的 Markdown 情报简报：\n\n"
@@ -416,7 +437,16 @@ def run_push_pipeline(
     print(f"[PUSH] 发现待推送数据: 商户 {len(merchants)} 家, 演唱会 {len(concerts)} 场。正在调用 Agent 总结...")
     report_markdown = generate_push_report(config, merchants, concerts)
 
-    item_stats = f"本次上新: 商户 {len(merchants)} 家, 演唱会 {len(concerts)} 场"
+    concert_groups = _group_concerts_by_region(concerts)
+    region_stats = "，".join(
+        f"{region} {len(concert_groups[region])} 场"
+        for region in ("香港", "新加坡", "其他演出")
+        if concert_groups[region]
+    )
+    concert_stats = f"演唱会 {len(concerts)} 场"
+    if region_stats:
+        concert_stats += f"（{region_stats}）"
+    item_stats = f"本次上新: 商户 {len(merchants)} 家, {concert_stats}"
     card = build_lark_card(report_markdown, item_stats=item_stats)
 
     if dry_run:

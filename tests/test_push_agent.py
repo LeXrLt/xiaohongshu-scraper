@@ -46,6 +46,35 @@ def test_build_lark_card():
     assert any("上新 2 条" in el.get("elements", [{}])[0].get("content", "") for el in elements if el.get("tag") == "note")
 
 
+def test_group_concerts_by_region_keeps_unknown_sources():
+    concerts = [
+        {"concert_id": "hk-1", "source": "hkt.hkticketing.com"},
+        {"concert_id": "sg-1", "source": "ticketmaster.sg"},
+        {"concert_id": "other-1", "source": "unknown.example"},
+    ]
+
+    groups = push_agent._group_concerts_by_region(concerts)
+
+    assert [c["concert_id"] for c in groups["香港"]] == ["hk-1"]
+    assert [c["concert_id"] for c in groups["新加坡"]] == ["sg-1"]
+    assert [c["concert_id"] for c in groups["其他演出"]] == ["other-1"]
+
+
+def test_build_agent_prompt_groups_concerts_by_region():
+    _, user_prompt = push_agent._build_agent_prompt(
+        [],
+        [
+            {"concert_id": "hk-1", "source": "hkt.hkticketing.com", "title": "香港场"},
+            {"concert_id": "sg-1", "source": "ticketmaster.sg", "title": "新加坡场"},
+        ],
+    )
+
+    assert "#### 香港（共 1 场）" in user_prompt
+    assert "#### 新加坡（共 1 场）" in user_prompt
+    assert user_prompt.index("#### 香港（共 1 场）") < user_prompt.index("#### 新加坡（共 1 场）")
+    assert "其他演出" not in user_prompt
+
+
 def test_send_to_lark_success(monkeypatch):
     """测试向飞书成功发送消息。"""
     mock_resp = MagicMock()
