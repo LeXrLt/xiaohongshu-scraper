@@ -1,223 +1,229 @@
-# 小红书爬虫与阅读器
+# 小红书爬虫与智能阅读器系统 (Xiaohongshu Scraper & Reader Stack)
 
-抓取小红书笔记、用户、搜索结果和评论，直接保存到 PostgreSQL，由阅读器访问同一数据库。支持媒体下载、视频转录、图片 OCR、评论分析和 Markdown / CSV / JSON / XLSX 导出。
+[![PostgreSQL](https://img.shields.io/badge/Storage-PostgreSQL_16-336791.svg)](https://www.postgresql.org/)
+[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Frontend-Next.js_14-black.svg)](https://nextjs.org/)
+[![MCP](https://img.shields.io/badge/Protocol-Model_Context_Protocol-purple.svg)](https://modelcontextprotocol.io/)
+[![Playwright](https://img.shields.io/badge/Browser-Playwright_Chromium-2EAD33.svg)](https://playwright.dev/)
 
-## 安装
+面向现代软件工程与 AI Agent 生态构建的**全栈社媒与票务情报基础设施**。
+基于 PostgreSQL 单一可信存储，实现小红书笔记/评论/用户采集、Ticketmaster SG 与 HKT 香港演出监控、多模态智能分析、带证据链的大模型商户抽取、现代化 Web 阅读器、Model Context Protocol (MCP) 查询插件及飞书自动化推送。
+
+---
+
+## 📚 项目工程与运维文档导航
+
+本项目遵循标准软件工程与运维通用文档架构，各类工程指南已全面归档：
+
+| 规范文档 | 说明 | 核心内容 |
+| :--- | :--- | :--- |
+| **[README.md](README.md)** | 项目入口 | 系统简介、快速上手、常用命令与模块导航 |
+| **[CHANGELOG.md](CHANGELOG.md)** | 版本更新日志 | 遵循 Keep a Changelog 规范，记录 v3.0 ~ v3.2 版本演进 |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | 开发规范指南 | 环境初始化、分支规范、代码风格、隔离测试准则 |
+| **[AGENTS.md](AGENTS.md)** | AI Agent 开发指令 | 针对 Coding Agent 的核心架构约束、确定性门禁与开发铁律 |
+| **[docs/PRD.md](docs/PRD.md)** | 产品需求文档 | 背景痛点、用户角色画像、各子系统功能与非功能性需求 |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | 系统架构设计 | 整体分层架构、系统时序图、组件职责边界与 ER 关系模型 |
+| **[docs/DESIGN.md](docs/DESIGN.md)** | 详细设计规范 | 签名逆向、状态机与幂等断点、商户抽取门禁、双 Token 鉴权 |
+| **[docs/openapi.yaml](docs/openapi.yaml)** | OpenAPI 3.0 接口契约 | FastAPI 后端完整 REST 规范（认证、笔记、商户、演出、设置） |
+| **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** | 部署与运维说明 | Docker Compose、Systemd、MCP 配置、Cron 自动化与安全检查单 |
+| **[docs/adr/](docs/adr/README.md)** | 架构决策记录 (ADR) | 存储选型、确定性验证、Token 鉴权、独立 Profile 等重大决策 |
+| **[docs/runbooks/](docs/runbooks/README.md)** | 运维与故障应急手册 | 登录态失效、签名异常、数据库迁移、服务恢复与推送排查 SOP |
+
+---
+
+## ⚡ 核心能力
+
+1. **小红书全要素采集与反爬对抗**：
+   - 动态逆向签名沙箱（Node.js 调用 `xhs_a1.js` / `xhs_xray.js`），支持一键自动更新签名算法。
+   - 支持笔记详情、博主时间线、关键词搜索（API 与 Playwright DOM 渲染模式）、二级嵌套评论采集。
+   - 细粒度断点续跑：任务游标与执行预算彻底解耦，单次中断零数据丢失。
+2. **多模态内容智能理解**：
+   - **图片分析**：三层分析架构，Layer 1 离线 RapidOCR；Layer 2 Ollama/OpenAI 视觉场景理解；Layer 3 自动提取步骤生成 Mermaid 流程图。
+   - **视频转录**：ffmpeg 抽取音频结合 Whisper 离线语音转写，视频关键帧 OCR 汇总。
+3. **多平台演出日历追踪**：
+   - Playwright 自动化绕过 Cloudflare EPS 反爬，解析内嵌 `calendarEvents` JSON 结构化数据。
+   - 使用独立 Playwright Profile 读取 HKT 香港快達票公开接口，仅抓取“演唱會”分类。
+   - Ticketmaster 与 HKT 按平台分表保存，通过统一视图向 API、MCP 和推送层提供演唱会数据。
+4. **确定性证据链商户知识库**：
+   - 大模型抽取结果强制进入暂存表，执行严格的**原文证据子串匹配算法**，杜绝大模型幻觉，未命中证据强制置空。
+   - 支持受控分类字典与场景标签（餐饮、演出、出行、医疗、SPA、签证等）。
+   - 智能商户名称归一化、去重合并 (`dedupe`) 与事务晋级 (`promote`)。
+5. **服务交付与生态集成**：
+   - **独立 Web 阅读器**：FastAPI 后端 + Next.js 14 前端，支持暗黑模式、分类检索、商户证据溯源与设置管理。
+   - **Model Context Protocol (merchants-mcp)**：提供 6 大只读工具，让 Claude / Codex 等 AI 助手轻松消费商户与演出数据。
+   - **飞书/Lark 增量推送代理 (Push Agent)**：自动发现最新入库商户与演出，大模型加工为精炼简报推送到群卡片。
+
+---
+
+## 🚀 快速上手
+
+### 1. 安装基础运行依赖
 
 ```bash
-python -m venv .venv
+# 1. 创建 Python 虚拟环境并安装核心依赖
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install pytest httpx
+
+# 2. 安装 Node.js 运行时依赖与 Playwright 浏览器
 cd assets && npm install && cd ..
+cd merchants-mcp && npm install && cd ..
 playwright install chromium
 ```
 
-Node.js 用于签名脚本，Playwright 用于登录和浏览器搜索；视频分析还需要 ffmpeg。
-浏览器搜索默认使用项目独立的 Playwright Chromium profile，不会关闭或接管本机浏览器。
-需要使用本机浏览器 profile 时，可设置 `XHS_DOM_BROWSER_MODE=real_profile`。
+> **注意**：Node.js 用于签名计算与 MCP；视频分析需要系统安装 `ffmpeg`。
 
-## 配置
+### 2. 初始化环境配置
 
-复制 `.env.example` 为 `.env`，填写 PostgreSQL 连接信息。爬虫、商户抽取和阅读器共用这些配置；运行数据命令前需要启动数据库。
-
-```env
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_USER=xhs_reader
-POSTGRES_PASSWORD=your_password
-POSTGRES_DB=xhs_reader
-```
-
-商户抽取 Agent 的配置也放在 `.env`，模板见 `.env.example`。运行
-`python scripts/merchant.py extract` 前至少需要配置
-`MERCHANT_AGENT_API_KEY`、`MERCHANT_AGENT_BASE_URL` 和 `MERCHANT_AGENT_MODEL`。
-抽取结果先进入候选表，经过证据校验后会自动幂等写入商户索引；已有候选可单独运行
-`python scripts/merchant.py promote`。
-
-API 抓取默认不限制账号和 IP 的每日请求数。如需设置上限，可在 `data/config.json`
-中配置 `daily_hard_cap`（单账号）和 `ip_daily_cap`，正数启用，`0` 表示不限。
-每日计数仍会保存，DOM 搜索保留独立的每日上限。
-
-所有抓取和抽取命令默认继续已保存的任务进度。商户抽取按笔记保存完成记录，
-包括没有商户、候选需人工复核的结果；失败笔记保留错误并在后续运行重试。
-已有候选会承接为历史进度。`--limit` 限制本次待处理笔记数，完成笔记在限额之前排除，
-因此重复运行会继续处理后面的笔记。改模型或版本不会自动重抽；确需重抽时使用
-`python scripts/merchant.py extract --note-id <id> --force`。
-
-## 常用命令
-
-```bash
-# 登录、抓取和导出
-python scripts/xhs.py login --prefer qr --name acc1
-python scripts/xhs.py user <user_id> --pages 3 --download --analyze
-python scripts/xhs.py search "关键词" --pages 2
-python scripts/xhs.py comments <note_id>
-python scripts/xhs.py export --format md
-
-# 查看本地运行日志
-python scripts/xhs_risk_status.py --summary
-python scripts/query_db.py stats
-python scripts/merchant.py init
-python scripts/merchant.py extract --limit 10
-python scripts/merchant.py promote
-# Ticketmaster SG 未开始演唱会
-python scripts/ticketmaster.py crawl --max-pages 20
-python scripts/ticketmaster.py list --limit 100
-# 预览重复商户；仅规范化同名或已有明确别名关系会匹配
-python scripts/merchant.py dedupe
-# 先备份受影响商户和全部来源关系，再执行合并（备份文件必须不存在）
-python scripts/merchant.py dedupe --backup data/merchant-dedupe-backup.json
-```
-
-`merchant.py init` 会初始化内置商户分类和标签字典。当前分类覆盖餐饮、文娱演出、交通出行、医疗健康、美容休闲和签证服务；标签按场景、环境、消费、预约、特色和便利分组。抽取提示词只允许 Agent 从这些字典中选择 `category_ids` 和 `tag_ids`，通过校验后分别写入商户分类关系和商户标签关系。
-
-### 数据存储
-
-所有抓取、分析、商户抽取、查询和导出都直接读写 PostgreSQL，无需额外同步。数据命令首次连接时会自动初始化或升级表结构。媒体文件、登录凭据和导出文件保存在本地 `data/`。
-
-`search` / `user` / `feed` 复用对应的 `crawl-*` 续跑流程；`crawl-config`、`run`、
-`serve` 也使用同一组断点。`--pages` / `--max-pages` 是每次运行的页数预算，
-达到预算会保存下一页，源数据耗尽才标记完成。任务身份不绑定账号，轮换账号继续
-同一任务，并兼容旧版账号断点。`--resume` 保留兼容，默认已开启；主动从第一页
-重新抓取需传 `--restart`。列表已经抓完后，如要发现新的内容，也需显式重新抓取。
-单篇 `note` 默认复用已有详情并继续媒体处理，主动更新详情使用 `--force`；
-`refresh` 则按笔记上次抓取时间轮流更新。
-
-主评论和每条评论的子评论分别保存游标；子评论达到单次预算后，下次继续该分支。
-页面中断时会重放尚未提交游标的那一页，已入库的数据通过主键复用。
-下载跳过完整的已有文件；新媒体目录包含笔记 ID，已有目录继续复用，避免同名笔记
-混用文件或改标题后重新下载。下载和分析失败会单独保存为待重试任务；后续启用相应
-选项的抓取命令会先继续这些任务，即使原抓取列表已经完成。图片 OCR 按图片内容保存进度，视频保留音频、抽帧、
-转录、逐帧 OCR 和纠错缓存；成功的空结果也记为完成，失败或缺依赖的阶段留待重试。
-视频文件或分析参数变化后会重新分析。分步分析的空结果不会清除已有分析和人工纠错。
-`cleanup` 保留任务断点和未完成搜索的页内进度，不再按时间清除它们。
-
-商户候选只晋级尚未处理或发生变化的记录；同名或明确别名对应的商户复用现有身份，
-匹配多个商户时进入人工复核。查询、统计分析和导出仍按当前数据生成结果；导出是
-可重复生成的文件，不参与抓取任务游标。
-
-### Ticketmaster SG 演唱会
-
-`python scripts/ticketmaster.py crawl` 使用 Playwright 打开
-`https://ticketmaster.sg/categories/concerts`，先完成网站的浏览器反爬验证，再读取列表
-分页和详情页内嵌的 `calendarEvents` JSON。详情页直接提供艺人、场馆、每场演出时间和
-`ticket/area/...` 购票链接，因此核心入库不调用 AI；这样不会让模型改写购票事实。活动
-信息写入 `ticketmaster_concerts`，每个日期/场次和购票链接写入
-`ticketmaster_concert_occurrences`，均保留原始 JSON 便于复核。
-
-浏览器上下文每次抓取都会新建，不复用本机 Cookie；启动时会把 UA 主版本与实际
-Chromium 对齐，并使用新加坡语言和时区。详情页之间默认间隔 1.5–3 秒，因为 Ticketmaster
-的 EPS 验证会把连续快速导航识别为异常。无桌面环境时可以继续使用无头模式；若仍出现
-验证页，建议在有桌面的机器上加 `--headed`，让验证脚本完成后再继续抓取。
-
-抓取只写入当前时间之后的场次；已入库场次开始后会标记为 `started`，`list` 默认只返回
-`upcoming`。活动页按 Ticketmaster 活动代码去重，场次按详情页的 event id 去重。任务
-进度复用 `xhs_crawl_state` 的 `ticketmaster:concerts`，在页内保存详情索引；进程中断后
-会重放当前详情页并继续；上一轮完成后再次运行会从第一页刷新，以发现新活动，重复数据
-由数据库幂等键合并。若要丢弃尚未完成的断点并立即从第一页开始，可使用 `--restart`。
-遇到需要人工完成的浏览器验证时可加 `--headed`；若系统找不到浏览器，可设置
-`TICKETMASTER_CHROMIUM_PATH` 指向 Chromium/Chrome 可执行文件。
-
-商户不设核实状态。升级前的本地数据库应先备份并完成一次性数据迁移，再停用旧版爬虫；新版不再读取或创建 `data/xhs.db`。
-
-## 独立阅读器
-
-项目包含 PostgreSQL、Python API 和 Next.js 前端：
+复制 `.env.example` 为 `.env`，生成并配置高强度安全密钥：
 
 ```bash
 cp .env.example .env
-# 生成永久密钥，将输出填写到 .env 的 API_AUTH_KEY
+
+# 生成至少 32 字节的安全随机密钥，将输出填写至 .env 的 API_AUTH_KEY
 python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+确保配置了正确的 PostgreSQL 数据库连接账号密码。
+
+---
+
+## 💻 常用 CLI 运维命令
+
+### 数据抓取与导出
+
+```bash
+# 登录小红书账号（优先使用终端/弹窗二维码扫码）
+python scripts/xhs.py login --prefer qr --name acc1
+
+# 抓取博主最近笔记（支持指定页数预算、自动下载媒体并执行多模态分析）
+python scripts/xhs.py user <user_id> --pages 3 --download --analyze
+
+# 关键词搜索抓取（断点续跑模式）
+python scripts/xhs.py search "香港美食" --pages 2
+
+# 抓取指定笔记的全部评论与展开子评论
+python scripts/xhs.py comments <note_id>
+
+# 导出已抓取笔记（支持 md / csv / json / xlsx）
+python scripts/xhs.py export --format md
+```
+
+### 商户抽取、校验与晋级
+
+```bash
+# 初始化受控分类与标签字典
+python scripts/merchant.py init
+
+# 增量执行商户抽取（仅处理未完成笔记，支持 --limit 限制处理批次）
+python scripts/merchant.py extract --limit 10
+
+# 将校验通过的候选商户晋级至正式商户索引
+python scripts/merchant.py promote
+
+# 预览确定性同名或别名重复商户
+python scripts/merchant.py dedupe
+
+# 强制备份受影响商户后执行安全去重合并
+python scripts/merchant.py dedupe --backup data/backups/merchant-dedupe-backup.json
+```
+
+### 演出与推送代理
+
+```bash
+# 增量抓取 Ticketmaster SG 近期演唱会
+python scripts/ticketmaster.py crawl --max-pages 10
+
+# 列表查看数据库中已收录的未开始演出
+python scripts/ticketmaster.py list --limit 20
+
+# 增量抓取 HKT 香港快達票演唱会
+python scripts/hkticketing.py crawl --max-pages 10
+
+# 列表查看 HKT 数据源中已收录的未开始演唱会
+python scripts/hkticketing.py list --limit 20
+
+# 预览飞书推送 Agent 生成的每日情报卡片（不实际触发发送）
+python scripts/push_agent.py --dry-run
+
+# 执行正式推送
+python scripts/push_agent.py
+```
+
+### 系统诊断与统计
+
+```bash
+# 查看数据库各表数据概览与统计
+python scripts/query_db.py stats
+
+# 查看当前 IP 与账号的爬虫风控与限流状态
+python scripts/xhs_risk_status.py --summary
+
+# 探测并更新最新逆向签名 JS
+python scripts/xhs.py update-js
+```
+
+---
+
+## 🌐 独立 Web 阅读器与 API
+
+项目提供完整的现代化全栈 Web 阅读器，直接读取 PostgreSQL 数据库：
+
+```bash
+# 一键通过 Docker Compose 启动全套服务（PostgreSQL + API + Frontend）
 docker compose up -d --build
 ```
 
-打开 <http://localhost:3000> 阅读 PostgreSQL 中的笔记。只运行数据库时使用 `docker compose up -d postgres`，本地运行 API 和前端：
+- **Web 阅读器界面**：<http://localhost:3000>
+- **FastAPI 接口文档 (Swagger)**：<http://localhost:8000/docs>
+
+### API 鉴权机制
+所有业务接口均由 Bearer Token 保护。直接调用后端时，先用根密钥换取临时 Token：
 
 ```bash
-python -m uvicorn main:app --app-dir web/backend --reload --port 8000
-cd web/frontend && npm install && npm run dev
-```
-
-### API 鉴权
-
-永久密钥统一配置在根目录 `.env` 的 `API_AUTH_KEY`，至少 32 字节，
-由管理员分发给可信调用者。未配置密钥或 token 有效期配置不合法时，后端拒绝启动。
-`API_TOKEN_TTL_SECONDS` 默认 `7200`（2 小时），必须为正整数。
-
-直接调用后端时，先用永久密钥换取临时 token：
-
-```bash
+# 1. 换取临时 Bearer Token
 curl -X POST http://localhost:8000/api/auth/token \
   -H "X-API-Key: <.env 中的 API_AUTH_KEY>"
 # 返回 {"access_token":"...","token_type":"bearer","expires_in":7200}
 
-curl http://localhost:8000/api/notes \
+# 2. 携带 Token 查询商户
+curl http://localhost:8000/api/merchants \
   -H "Authorization: Bearer <access_token>"
 ```
 
-笔记、商户及设置的全部读写接口均需 Bearer token；永久密钥不能直接访问数据接口。
-token 过期、签名无效或缺失时返回 `401`。健康检查 `/api/health` 和接口文档
-`/docs` 保持公开，`/api/auth/token` 则校验 `X-API-Key`。
+---
 
-前端自动读取同一份根目录 `.env` 中的密钥，按需换取、缓存和提前续期 token；
-并发请求共用一次换取请求，数据接口返回 `401` 后重新换取并重试一次，用户无需操作。
-token 仅保存在内存中，刷新页面后重新获取。
-本地前端从根目录加载 `.env`；Docker Compose 在构建时传入密钥。
-修改密钥后需重启后端并重新构建/重启前端，已签发的旧 token 随后失效：
+## 🤖 Model Context Protocol (merchants-mcp)
+
+`merchants-mcp/` 是基于标准 MCP 协议开发的 Node.js 插件包，让外部 AI 助手无需直接连接数据库即可查询经过验证的商户与演出情报。
+
+安装到 Codex CLI：
+```bash
+codex mcp add merchants \
+  --env MERCHANTS_API_KEY="<.env 中的 API_AUTH_KEY>" \
+  --env MERCHANTS_API_URL="http://localhost:8000" \
+  -- npx -y merchants-mcp
+```
+
+详情请阅读 [merchants-mcp/README.md](merchants-mcp/README.md)。
+
+---
+
+## 🧪 自动化测试与验证
+
+本项目采用测试安全隔离机制，测试套件会在 PostgreSQL 中动态生成临时 schema 运行，完成后自动清理，绝不修改线上业务数据：
 
 ```bash
-docker compose up -d --build api frontend
-```
-
-**公网部署边界：** 当前按浏览器直接请求 API 的方式实现，密钥会编译进前端，
-任何能访问前端的人都能取得它并拥有数据及设置读写权限（包括 cookies）。
-这适用于仅允许可信用户访问的前端。前端若完全公开，需增加用户登录或网关访问控制，
-也可将密钥移到 Next.js 服务端代理并对代理入口鉴权。公网传输应使用 HTTPS。
-
-设置页保存的关键词、博主和 cookies 会写入 PostgreSQL 的 `reader_config` 表；可以从项目根目录执行：
-
-```bash
-python scripts/xhs.py crawl-config --max-pages 2
-```
-
-## 目录结构
-
-商户推荐 MCP 位于 [`merchants-mcp/`](merchants-mcp/README.md)，提供分类发现、标签检索、
-商户搜索、关联笔记读取，以及 Ticketmaster SG 即将举行的演唱会和场次详情查询。agent
-按分类定位商户，或按艺人/场馆/日期定位演唱会，再根据数据库来源生成回答。
-支持 stdio 和 npm 命令入口，安装、配置及发布步骤见该目录说明。
-
-```
-├── scripts/xhs.py         # 爬虫 CLI
-├── scripts/ticketmaster.py # Ticketmaster SG 演唱会抓取与查询 CLI
-├── scripts/merchant.py    # 商户表初始化、Agent 抽取与候选校验
-├── scripts/merchant_prompt.md # 商户 Agent 抽取提示词
-├── database.py            # 共用 PostgreSQL 连接与表结构初始化
-├── scripts/xhs_storage.py # PostgreSQL 存储与导出
-├── schema.sql             # PostgreSQL 表结构
-├── web/backend/           # FastAPI API
-├── web/frontend/          # Next.js 阅读器
-├── merchants-mcp/        # npm MCP 包：商户和 Ticketmaster 演唱会查询
-├── assets/                # 签名脚本
-└── data/                  # 媒体、登录凭据、导出文件和运行日志
-```
-
-## 故障排查
-
-- PostgreSQL 连接失败：检查 `.env` 并确认数据库已启动；爬虫与阅读器使用同一个 `POSTGRES_DB`。
-- 签名失效：运行 `python scripts/xhs.py update-js`。
-- 风控或限流：运行 `python scripts/xhs_risk_status.py --summary` 查看本地日志。
-
-## 测试
-
-启动 PostgreSQL 并配置 `.env` 后运行：
-
-```bash
-pip install pytest httpx
+# 1. 执行 Python 全量自动化回归测试
 python -m pytest tests -q
+
+# 2. 执行前端 API 鉴权测试 (需在 web/frontend 执行 npm install)
 node --test tests/frontend-api.test.cjs
+
+# 3. 执行 MCP 插件测试
+cd merchants-mcp && npm test && cd ..
+
+# 4. 代码格式与空白字符检查
+git diff --check
 ```
-
-前端鉴权测试需要先在 `web/frontend` 执行 `npm install`。
-
-数据库测试在独立的临时 schema 中运行，结束后自动清理，不修改站点数据。连接账号需要创建 schema 的权限。

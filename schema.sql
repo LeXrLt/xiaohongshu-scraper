@@ -278,6 +278,84 @@ CREATE INDEX IF NOT EXISTS idx_ticketmaster_occurrences_upcoming
 CREATE INDEX IF NOT EXISTS idx_ticketmaster_occurrences_concert
     ON ticketmaster_concert_occurrences(concert_id);
 
+-- HKT Hong Kong 演唱会：按来源独立保存，避免把来源特有的项目/票档语义塞进 Ticketmaster 表。
+CREATE TABLE IF NOT EXISTS hkticketing_concerts (
+    concert_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT 'hkt.hkticketing.com',
+    title TEXT NOT NULL DEFAULT '',
+    artist_name TEXT NOT NULL DEFAULT '',
+    artist_id TEXT NOT NULL DEFAULT '',
+    promoter TEXT NOT NULL DEFAULT '',
+    category_name TEXT NOT NULL DEFAULT 'Concerts',
+    venue_name TEXT NOT NULL DEFAULT '',
+    city TEXT NOT NULL DEFAULT 'Hong Kong',
+    country TEXT NOT NULL DEFAULT 'HK',
+    event_url TEXT NOT NULL DEFAULT '',
+    image_url TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    source_hash TEXT NOT NULL DEFAULT '',
+    raw_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended', 'cancelled', 'unknown')),
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS hkticketing_concert_occurrences (
+    occurrence_id TEXT PRIMARY KEY,
+    concert_id TEXT NOT NULL REFERENCES hkticketing_concerts(concert_id) ON DELETE CASCADE,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    start_at TIMESTAMPTZ NOT NULL,
+    end_at TIMESTAMPTZ,
+    display_date TEXT NOT NULL DEFAULT '',
+    venue_name TEXT NOT NULL DEFAULT '',
+    ticket_url TEXT NOT NULL DEFAULT '',
+    ticket_status TEXT NOT NULL DEFAULT '',
+    source_hash TEXT NOT NULL DEFAULT '',
+    raw_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'started', 'cancelled', 'unknown')),
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (concert_id, source_event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hkticketing_concerts_artist
+    ON hkticketing_concerts(artist_name);
+CREATE INDEX IF NOT EXISTS idx_hkticketing_concerts_status
+    ON hkticketing_concerts(status);
+CREATE INDEX IF NOT EXISTS idx_hkticketing_occurrences_start
+    ON hkticketing_concert_occurrences(start_at);
+CREATE INDEX IF NOT EXISTS idx_hkticketing_occurrences_upcoming
+    ON hkticketing_concert_occurrences(status, start_at);
+CREATE INDEX IF NOT EXISTS idx_hkticketing_occurrences_concert
+    ON hkticketing_concert_occurrences(concert_id);
+
+-- API/MCP/推送读取统一视图；写入仍由各平台适配器分别负责。
+CREATE OR REPLACE VIEW concerts_unified AS
+SELECT concert_id, source, title, artist_name, artist_id, promoter, category_name,
+       venue_name, city, country, event_url, image_url, description, source_hash,
+       raw_data, status, first_seen_at, last_seen_at, updated_at,
+       'Asia/Singapore'::TEXT AS local_timezone
+FROM ticketmaster_concerts
+UNION ALL
+SELECT concert_id, source, title, artist_name, artist_id, promoter, category_name,
+       venue_name, city, country, event_url, image_url, description, source_hash,
+       raw_data, status, first_seen_at, last_seen_at, updated_at,
+       'Asia/Hong_Kong'::TEXT AS local_timezone
+FROM hkticketing_concerts;
+
+CREATE OR REPLACE VIEW concert_occurrences_unified AS
+SELECT occurrence_id, concert_id, source_event_id, start_at, end_at, display_date,
+       venue_name, ticket_url, ticket_status, source_hash, raw_data, status,
+       first_seen_at, last_seen_at, updated_at
+FROM ticketmaster_concert_occurrences
+UNION ALL
+SELECT occurrence_id, concert_id, source_event_id, start_at, end_at, display_date,
+       venue_name, ticket_url, ticket_status, source_hash, raw_data, status,
+       first_seen_at, last_seen_at, updated_at
+FROM hkticketing_concert_occurrences;
+
 -- 阅读器配置：单实例设置，关键词/博主用 JSON 数组保存，cookie 由 API 统一读取。
 CREATE TABLE IF NOT EXISTS reader_config (
     id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -300,11 +378,11 @@ ALTER TABLE xhs_comments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT
 -- 移除旧版商户核实状态，重复执行时跳过已删除的字段。
 ALTER TABLE merchants DROP COLUMN IF EXISTS status;
 
--- 推送记录表：通用多态记录库中商户、演唱会等实体的推送状态。
+-- 推送记录表：通用多态记录库中商户、各平台演唱会等实体的推送状态。
 -- 规则：若表中没有某个实体的记录（或当前渠道下无记录），说明该实体尚未推送过。
 CREATE TABLE IF NOT EXISTS push_records (
     record_id BIGSERIAL PRIMARY KEY,
-    entity_type TEXT NOT NULL,                  -- 'merchant', 'ticketmaster_concert', 'ticketmaster_occurrence' 等
+    entity_type TEXT NOT NULL,                  -- 'merchant', 'ticketmaster_concert', 'ticketmaster_occurrence' 等（演唱会查询覆盖所有平台）
     entity_id TEXT NOT NULL,                    -- 实体主键 (merchant_id, concert_id 等)
     channel TEXT NOT NULL DEFAULT 'default',    -- 推送渠道标识，如 'default', 'feishu', 'wechat_work', 'webhook'
     push_status TEXT NOT NULL DEFAULT 'pending' CHECK (push_status IN ('pending', 'success', 'failed', 'skipped')),

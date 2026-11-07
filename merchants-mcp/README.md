@@ -1,6 +1,6 @@
 # merchants-mcp
 
-通过 MCP 为 agent 提供商户分类、标签、候选检索、关联笔记，以及 Ticketmaster SG 即将举行的演唱会查询和详情。商户推荐和演唱会介绍都只使用数据库中已抓取的来源数据。
+通过 MCP 为 agent 提供商户分类、标签、候选检索、关联笔记，以及已接入票务平台（Ticketmaster SG、HKT 香港快達票）即将举行的演唱会查询和详情。商户推荐和演唱会介绍都只使用数据库中已抓取的来源数据。
 
 包使用 Node.js 原生 JavaScript 和 MCP SDK v2，通过 stdio 通信，无需构建，也无需另配大模型 API key。需要 **Node.js ≥ 20.19**。
 
@@ -48,7 +48,7 @@ codex mcp add merchants \
 3. 调用 `search_merchants`，在已选分类内按城市、区域、标签及介绍核心词检索。多个标签全部满足；父分类自动包含启用的子分类。结果按资料更新时间排列，agent 需根据用户需求评估匹配度。
 4. 对准备推荐的商户调用 `get_merchant_details`，阅读关联笔记正文、商户证据、图片/视频摘要及日期。`notes_has_more` 为真时可通过 `notes_page` 继续读取。
 5. agent 返回商户名称、城市/区域、匹配理由、已知价格及币种/计价方式、预约信息，综合相关笔记总结介绍、体验与分歧，并附笔记标题、链接和日期。不编造缺失信息，不悄悄放宽硬性要求。
-6. 用户询问演唱会时，调用 `list_upcoming_concerts` 按艺人、场馆、关键词或日期范围查找尚未开始的场次，再调用 `get_concert_details` 读取活动描述、主办方、所有场次、状态和 Ticketmaster 链接。日期使用 `YYYY-MM-DD`；结果只代表数据库最近一次抓取的状态。
+6. 用户询问演唱会时，调用 `list_upcoming_concerts` 按艺人、场馆、关键词或日期范围查找尚未开始的场次，再调用 `get_concert_details` 读取来源、活动描述、主办方、所有场次、状态和官方购票链接。日期使用 `YYYY-MM-DD`；结果只代表数据库最近一次抓取的状态。
 
 例如用户说“今年 11 月有哪些流行歌手在新加坡开唱？”时，agent 将月份转换为对应的 `from_date`/`to_date` 查询；用户追问某一场的场馆、日期或购票地址时，再把结果中的 `concert_id` 传给详情工具。
 
@@ -60,14 +60,16 @@ codex mcp add merchants \
 | `list_merchant_tags` | `category_id` | 分类内实际使用的标签及商户数 |
 | `search_merchants` | 必填 `category_id`；可选 `tag_ids`、`keyword`、`city`、`district`、`page`、`page_size` | 商户摘要、关联介绍证据、分类/标签、匹配条件、是否有下一页 |
 | `get_merchant_details` | `merchant_id`、`notes_page`、`notes_page_size` | 商户信息、分类/标签证据、关联笔记、来源链接和日期 |
-| `list_upcoming_concerts` | 可选 `keyword`、`artist`、`venue`、`from_date`、`to_date`、分页 | Ticketmaster SG 中尚未开始的演唱会场次，按开始时间排序 |
+| `list_upcoming_concerts` | 可选 `keyword`、`artist`、`venue`、`from_date`、`to_date`、分页 | 已接入平台中尚未开始的演唱会场次，按开始时间排序 |
 | `get_concert_details` | `concert_id`、场次分页 | 演唱会活动、艺人、主办方、描述、场馆、场次状态和购票链接 |
 
 `keyword` 在名称、别名、菜系、预约信息、启用标签名称/说明，以及与该商户绑定的介绍证据中做字面子串匹配，不是自然语言语义搜索。请将整句需求拆成分类、标签和核心词。搜索不会因为同篇笔记提到其他商户的特点，就把这些特点算给当前商户。
 
-演唱会的 `keyword`、`artist` 和 `venue` 同样是字面子串筛选；`list_upcoming_concerts` 只返回 `status=upcoming` 且开始时间晚于当前时间的场次。Ticketmaster 页面可能在抓取后发生改期、取消或售罄，回答时应说明数据来自最近一次抓取，不根据购票链接推断价格或库存。
+演唱会的 `keyword`、`artist` 和 `venue` 同样是字面子串筛选；`list_upcoming_concerts` 只返回 `status=upcoming` 且开始时间晚于当前时间的场次。票务平台页面可能在抓取后发生改期、取消或售罄，回答时应说明数据来自最近一次抓取，不根据购票链接推断价格或库存。
 
 商户列表默认每页 10 条，最大 30 条。来源笔记默认每页 5 条，最大 10 条；每条笔记的正文、证据及图片/视频摘要字段最多返回 12000 个 UTF-16 代码单元，截断时通过 `truncated_fields` 明确标记。`note_count` 是独立笔记数，`notes_total` 是关联记录数；同一篇笔记可能存在多种关联关系。agent 不应声称已阅读未返回或截断的内容。
+
+演唱会活动描述也最多返回 12000 个 UTF-16 代码单元，截断时通过活动记录中的 `truncated_fields` 标记；`raw_data` 不通过 MCP 暴露。
 
 分类目录为空时请管理员执行 `python scripts/merchant.py init`；没有商户时需先抓取笔记并运行商户抽取。MCP 不会为了填充结果而修改数据库或实时抓取。
 
@@ -92,8 +94,8 @@ codex mcp add merchants \
 | `GET /api/merchant-tags` | 标签目录，支持 `category_id` |
 | `GET /api/merchants` | 分类（含子类）、重复参数 `tag_ids`（AND）、`keyword`、城市/区域和分页 |
 | `GET /api/merchants/{merchant_id}` | 商户详情；可传 `notes_page`、`notes_page_size` 分页读取关联笔记 |
-| `GET /api/concerts/upcoming` | Ticketmaster 尚未开始场次；支持 `keyword`、`artist`、`venue`、`from_date`、`to_date` 和分页 |
-| `GET /api/concerts/{concert_id}` | Ticketmaster 活动详情和场次；支持 `occurrences_page`、`occurrences_page_size` |
+| `GET /api/concerts/upcoming` | 已接入平台尚未开始场次；支持 `keyword`、`artist`、`venue`、`from_date`、`to_date` 和分页 |
+| `GET /api/concerts/{concert_id}` | 活动详情和场次；支持 `occurrences_page`、`occurrences_page_size` |
 
 除换 token 接口外均使用 Bearer token。缺少上述接口的旧版后端需要升级后使用。
 

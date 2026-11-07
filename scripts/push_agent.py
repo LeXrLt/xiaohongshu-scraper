@@ -170,7 +170,7 @@ def fetch_unpushed_data(
         concert_ids = [c["concert_id"] for c in raw_concerts]
         cur = conn.execute(
             """SELECT concert_id, start_at, display_date, venue_name, ticket_url, ticket_status
-               FROM ticketmaster_concert_occurrences
+               FROM concert_occurrences_unified
                WHERE concert_id = ANY(%s)
                ORDER BY start_at ASC""",
             (concert_ids,),
@@ -188,6 +188,7 @@ def fetch_unpushed_data(
             cid = c["concert_id"]
             enriched_concerts.append({
                 "concert_id": cid,
+                "source": c.get("source") or "",
                 "title": c.get("title") or "演出",
                 "artist_name": c.get("artist_name") or "",
                 "venue_name": c.get("venue_name") or "",

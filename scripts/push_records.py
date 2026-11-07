@@ -15,6 +15,7 @@ from psycopg2.extras import Json, DictRow
 
 
 ENTITY_TYPE_MERCHANT = "merchant"
+# 保留旧实体类型值，兼容已有 push_records；底层查询通过统一视图覆盖所有平台。
 ENTITY_TYPE_CONCERT = "ticketmaster_concert"
 ENTITY_TYPE_OCCURRENCE = "ticketmaster_occurrence"
 ENTITY_TYPE_NOTE = "xhs_note"
@@ -79,7 +80,7 @@ def find_unpushed_entities(
     elif entity_type == ENTITY_TYPE_CONCERT:
         sql = f"""
             SELECT c.*, p.record_id AS push_record_id, p.push_status
-            FROM ticketmaster_concerts c
+            FROM concerts_unified c
             LEFT JOIN push_records p
               ON p.entity_type = %s
              AND p.entity_id = c.concert_id
@@ -92,8 +93,8 @@ def find_unpushed_entities(
         sql = f"""
             SELECT o.*, c.title AS concert_title, c.artist_name,
                    p.record_id AS push_record_id, p.push_status
-            FROM ticketmaster_concert_occurrences o
-            JOIN ticketmaster_concerts c ON c.concert_id = o.concert_id
+            FROM concert_occurrences_unified o
+            JOIN concerts_unified c ON c.concert_id = o.concert_id
             LEFT JOIN push_records p
               ON p.entity_type = %s
              AND p.entity_id = o.occurrence_id
@@ -141,7 +142,7 @@ def find_updated_entities(
     elif entity_type == ENTITY_TYPE_CONCERT:
         sql = f"""
             SELECT c.*, p.last_pushed_at, p.content_hash AS pushed_hash, p.entity_updated_at AS pushed_updated_at
-            FROM ticketmaster_concerts c
+            FROM concerts_unified c
             JOIN push_records p
               ON p.entity_type = %s
              AND p.entity_id = c.concert_id
@@ -159,8 +160,8 @@ def find_updated_entities(
         sql = f"""
             SELECT o.*, c.title AS concert_title, c.artist_name,
                    p.last_pushed_at, p.content_hash AS pushed_hash, p.entity_updated_at AS pushed_updated_at
-            FROM ticketmaster_concert_occurrences o
-            JOIN ticketmaster_concerts c ON c.concert_id = o.concert_id
+            FROM concert_occurrences_unified o
+            JOIN concerts_unified c ON c.concert_id = o.concert_id
             JOIN push_records p
               ON p.entity_type = %s
              AND p.entity_id = o.occurrence_id

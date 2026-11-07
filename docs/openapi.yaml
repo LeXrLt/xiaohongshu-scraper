@@ -1,0 +1,839 @@
+openapi: 3.0.3
+info:
+  title: XHS Reader API
+  description: >
+    小红书阅读器与商户/演唱会情报系统 HTTP 后端接口规范。
+    除公开健康检查接口及 Token 换取接口外，所有业务接口均由 Bearer Token (JWT) 保护。
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+    description: 本地开发后端
+  - url: /
+    description: 容器内或反代后相对路径
+
+paths:
+  /api/health:
+    get:
+      summary: 健康检查
+      description: 验证 API 服务可用性及与 PostgreSQL 数据库的基础连通性。
+      tags:
+        - System
+      responses:
+        '200':
+          description: 服务与数据库连通正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '503':
+          description: 数据库不可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/token:
+    post:
+      summary: 使用永久密钥换取临时访问 Token
+      description: >
+        向管理员分发的高强度永久密钥 (`X-API-Key`) 发起校验，
+        校验成功后签发具有有限生命周期（默认 7200 秒）的 HS256 Bearer JWT。
+      tags:
+        - Authentication
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: 成功签发临时 Token
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: 提供的 API 密钥缺失或无效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/settings:
+    get:
+      summary: 获取阅读器全局配置
+      description: 读取当前单例运行配置，包括监控关键词、博主 ID 列表及 Cookie。
+      tags:
+        - Settings
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: 当前配置字典
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReaderConfig'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableError'
+    put:
+      summary: 更新阅读器全局配置
+      description: 在线更新监控关键词、博主池以及小红书 Cookie。
+      tags:
+        - Settings
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingsPayload'
+      responses:
+        '200':
+          description: 更新成功后的配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReaderConfig'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableError'
+
+  /api/notes:
+    get:
+      summary: 分页检索小红书笔记
+      description: 根据关键词与博主昵称/ID 过滤笔记，返回摘要列表。
+      tags:
+        - Notes
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: keyword
+          in: query
+          description: 匹配标题、正文或描述的关键词
+          schema:
+            type: string
+            maxLength: 120
+        - name: blogger
+          in: query
+          description: 匹配博主 User ID 或昵称
+          schema:
+            type: string
+            maxLength: 120
+        - name: page
+          in: query
+          description: 当前页码
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+            maximum: 10000
+        - name: page_size
+          in: query
+          description: 每页记录数
+          schema:
+            type: integer
+            default: 24
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: 笔记分页结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NoteSummary'
+                  page:
+                    type: integer
+                    example: 1
+                  page_size:
+                    type: integer
+                    example: 24
+                  total:
+                    type: integer
+                    example: 128
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /api/notes/{note_id}:
+    get:
+      summary: 获取单篇笔记完整详情
+      description: 包括完整正文、博主资料、多模态转录与图片/视频分析结论。
+      tags:
+        - Notes
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: note_id
+          in: path
+          required: true
+          description: 小红书笔记唯一标识 ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 笔记完整对象
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteDetail'
+        '404':
+          description: 笔记不存在
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /api/merchant-categories:
+    get:
+      summary: 列出受控商户分类目录
+      description: 返回当前激活的分类树及包含其所有子分类的有效商户总数。
+      tags:
+        - Merchants
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: keyword
+          in: query
+          description: 过滤分类名称、说明或别名
+          schema:
+            type: string
+            maxLength: 120
+      responses:
+        '200':
+          description: 分类列表与数量
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MerchantCategoryItem'
+                  total:
+                    type: integer
+                    example: 14
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /api/merchant-tags:
+    get:
+      summary: 查询商户标签字典
+      description: 获取当前系统启用的标签列表，可按分类限定只返回该分类下实际使用过的标签。
+      tags:
+        - Merchants
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: category_id
+          in: query
+          description: 限定父分类 ID（自动递归其子分类）
+          schema:
+            type: string
+            maxLength: 80
+      responses:
+        '200':
+          description: 标签列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MerchantTagItem'
+                  total:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /api/merchants:
+    get:
+      summary: 检索商户知识库
+      description: 组合分类、多标签 AND 筛选、城市/区域和核心词检索商户摘要。
+      tags:
+        - Merchants
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: keyword
+          in: query
+          description: 匹配商户名、别名、菜系、预约说明或证据文本
+          schema:
+            type: string
+            maxLength: 120
+        - name: city
+          in: query
+          schema:
+            type: string
+            maxLength: 80
+        - name: district
+          in: query
+          schema:
+            type: string
+            maxLength: 80
+        - name: category_id
+          in: query
+          description: 分类 ID（自动包含启用的子分类）
+          schema:
+            type: string
+            maxLength: 80
+        - name: tag_ids
+          in: query
+          description: 标签 ID 列表，满足全部标签方可命中
+          schema:
+            type: array
+            items:
+              type: string
+            maxItems: 10
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+            maximum: 10000
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 24
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: 商户检索分页结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MerchantSummary'
+                  page:
+                    type: integer
+                  page_size:
+                    type: integer
+                  total:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /api/merchants/{merchant_id}:
+    get:
+      summary: 获取商户详情与关联来源笔记
+      description: 返回商户完整字段、分类、标签，以及关联的带证据小红书笔记列表。
+      tags:
+        - Merchants
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: merchant_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: notes_page
+          in: query
+          description: 来源笔记分页页码
+          schema:
+            type: integer
+            default: 1
+        - name: notes_page_size
+          in: query
+          description: 来源笔记单页条数，留空时返回全部关联笔记
+          schema:
+            type: integer
+            maximum: 50
+      responses:
+        '200':
+          description: 商户完整详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantDetail'
+        '404':
+          description: 未找到商户
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /api/concerts/upcoming:
+    get:
+      summary: 查询已接入平台即将开唱的演出场次
+      description: 按开始时间升序返回所有未开始的演出场次及官方购票链接，并标注数据来源。
+      tags:
+        - Concerts
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: keyword
+          in: query
+          description: 匹配标题、艺人、场馆、主办方或描述
+          schema:
+            type: string
+        - name: artist
+          in: query
+          schema:
+            type: string
+        - name: venue
+          in: query
+          schema:
+            type: string
+        - name: from_date
+          in: query
+          description: 起始日期 (YYYY-MM-DD，包含)
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          description: 结束日期 (YYYY-MM-DD，包含)
+          schema:
+            type: string
+            format: date
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        '200':
+          description: 未开始演出场次列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConcertOccurrenceItem'
+                  page:
+                    type: integer
+                  page_size:
+                    type: integer
+                  total:
+                    type: integer
+        '422':
+          description: 参数校验错误（如 from_date 晚于 to_date）
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /api/concerts/{concert_id}:
+    get:
+      summary: 获取演出活动详情与全部场次
+      description: 返回活动标题、艺人、主办方、详情介绍及该活动的所有具体演出时间。
+      tags:
+        - Concerts
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: concert_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: occurrences_page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: occurrences_page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        '200':
+          description: 演出完整详情与场次列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConcertDetail'
+        '404':
+          description: 演出不存在
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 永久管理员密钥，仅用于 POST /api/auth/token 换取短期 Token
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: HS256 签名的短期访问凭证，由 /api/auth/token 签发
+
+  responses:
+    UnauthorizedError:
+      description: 凭证缺失、无效或已过期 (401)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailableError:
+      description: 依赖的基础服务（PostgreSQL）暂时不可用 (503)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    TokenResponse:
+      type: object
+      required:
+        - access_token
+        - token_type
+        - expires_in
+      properties:
+        access_token:
+          type: string
+          description: HS256 JWT Token
+        token_type:
+          type: string
+          example: bearer
+        expires_in:
+          type: integer
+          description: 有效秒数
+          example: 7200
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          example: Invalid or expired access token
+
+    SettingsPayload:
+      type: object
+      properties:
+        keywords:
+          type: array
+          items:
+            type: string
+        bloggers:
+          type: array
+          items:
+            type: string
+        cookies:
+          type: string
+
+    ReaderConfig:
+      type: object
+      properties:
+        keywords:
+          type: array
+          items:
+            type: string
+        bloggers:
+          type: array
+          items:
+            type: string
+        cookies:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    NoteSummary:
+      type: object
+      properties:
+        note_id:
+          type: string
+        user_id:
+          type: string
+        nickname:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+        liked_count:
+          type: integer
+        collected_count:
+          type: integer
+        comment_count:
+          type: integer
+        share_count:
+          type: integer
+        ip_location:
+          type: string
+        topics:
+          type: array
+          items:
+            type: string
+        published_at:
+          type: string
+        cover_url:
+          type: string
+        image_urls:
+          type: array
+          items:
+            type: string
+        note_url:
+          type: string
+        media_path:
+          type: string
+        crawled_at:
+          type: string
+          format: date-time
+
+    NoteDetail:
+      allOf:
+        - $ref: '#/components/schemas/NoteSummary'
+        - type: object
+          properties:
+            content:
+              type: string
+            avatar:
+              type: string
+            video_url:
+              type: string
+            video_transcript:
+              type: string
+            video_summary:
+              type: string
+            image_ocr_text:
+              type: string
+            image_summary:
+              type: string
+            image_mermaid:
+              type: string
+
+    MerchantCategoryItem:
+      type: object
+      properties:
+        category_id:
+          type: string
+        parent_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        aliases:
+          type: array
+          items:
+            type: string
+        taxonomy_version:
+          type: string
+        merchant_count:
+          type: integer
+
+    MerchantTagItem:
+      type: object
+      properties:
+        tag_id:
+          type: string
+        group_name:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        merchant_count:
+          type: integer
+
+    MerchantSummary:
+      type: object
+      properties:
+        merchant_id:
+          type: string
+        canonical_name:
+          type: string
+        aliases:
+          type: array
+          items:
+            type: string
+        city:
+          type: string
+        district:
+          type: string
+        cuisine:
+          type: array
+          items:
+            type: string
+        price_min:
+          type: integer
+          nullable: true
+        price_max:
+          type: integer
+          nullable: true
+        currency:
+          type: string
+        price_basis:
+          type: string
+        confidence:
+          type: number
+        reservation_info:
+          type: string
+        description:
+          type: string
+        note_count:
+          type: integer
+        categories:
+          type: array
+          items:
+            type: object
+        tags:
+          type: array
+          items:
+            type: object
+
+    MerchantDetail:
+      allOf:
+        - $ref: '#/components/schemas/MerchantSummary'
+        - type: object
+          properties:
+            notes:
+              type: array
+              items:
+                type: object
+                properties:
+                  note_id:
+                    type: string
+                  title:
+                    type: string
+                  content:
+                    type: string
+                  relation_type:
+                    type: string
+                  evidence_text:
+                    type: string
+                  confidence:
+                    type: number
+                  note_url:
+                    type: string
+                  published_at:
+                    type: string
+            note_count:
+              type: integer
+            notes_total:
+              type: integer
+            notes_page:
+              type: integer
+            notes_page_size:
+              type: integer
+              nullable: true
+            notes_has_more:
+              type: boolean
+
+    ConcertOccurrenceItem:
+      type: object
+      properties:
+        concert_id:
+          type: string
+        source:
+          type: string
+          description: 数据来源，例如 ticketmaster.sg 或 hkt.hkticketing.com
+        title:
+          type: string
+        artist_name:
+          type: string
+        artist_id:
+          type: string
+        promoter:
+          type: string
+        category_name:
+          type: string
+        venue_name:
+          type: string
+        city:
+          type: string
+        country:
+          type: string
+        event_url:
+          type: string
+        image_url:
+          type: string
+        description:
+          type: string
+        occurrence_id:
+          type: string
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+          nullable: true
+        display_date:
+          type: string
+        occurrence_venue_name:
+          type: string
+        ticket_url:
+          type: string
+        ticket_status:
+          type: string
+        occurrence_status:
+          type: string
+
+    ConcertDetail:
+      type: object
+      properties:
+        concert_id:
+          type: string
+        source:
+          type: string
+        title:
+          type: string
+        artist_name:
+          type: string
+        promoter:
+          type: string
+        venue_name:
+          type: string
+        city:
+          type: string
+        country:
+          type: string
+        event_url:
+          type: string
+        image_url:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+        occurrences:
+          type: array
+          items:
+            type: object
+        occurrences_total:
+          type: integer
+        occurrences_page:
+          type: integer
+        occurrences_page_size:
+          type: integer
+        occurrences_has_more:
+          type: boolean

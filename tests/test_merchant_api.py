@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "web/backend"))
 import auth
+import database
 import main
 
 
@@ -172,6 +173,42 @@ def test_upcoming_concerts_filter_and_details(merchant_client):
     assert merchant_client.get('/api/concerts/upcoming', params={
         'from_date': '2099-12-01', 'to_date': '2099-11-01',
     }).status_code == 422
+
+
+def test_upcoming_concerts_reads_hkt_source_tables_through_unified_views(merchant_client):
+    conn = database.connect(initialize=False)
+    try:
+        conn.execute(
+            """INSERT INTO hkticketing_concerts
+               (concert_id, source, title, venue_name, city, country, event_url, status)
+               VALUES ('hkt:project-1', 'hkt.hkticketing.com', 'HKT Live',
+                       '亞洲國際博覽館Arena', '香港', 'HK',
+                       'https://hkt.hkticketing.com/hant/#/allEvents/detail?projectId=project-1', 'active')"""
+        )
+        conn.execute(
+            """INSERT INTO hkticketing_concert_occurrences
+               (occurrence_id, concert_id, source_event_id, start_at, display_date,
+                venue_name, ticket_url, ticket_status, status)
+               VALUES ('hkt-occurrence-1', 'hkt:project-1', '60000001',
+                       '2099-11-21 17:00:00+08', '2026年11月21日 下午5時',
+                       '亞洲國際博覽館Arena',
+                       'https://hkt.hkticketing.com/hant/#/allEvents/detail/selectTicket?activityId=project-1',
+                       'available', 'upcoming')"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = merchant_client.get('/api/concerts/upcoming', params={'keyword': 'HKT'})
+    assert response.status_code == 200
+    data = response.json()
+    assert data['total'] == 1
+    assert data['items'][0]['source'] == 'hkt.hkticketing.com'
+    assert data['items'][0]['country'] == 'HK'
+
+    detail = merchant_client.get('/api/concerts/hkt:project-1').json()
+    assert detail['source'] == 'hkt.hkticketing.com'
+    assert detail['occurrences'][0]['ticket_url'].endswith('activityId=project-1')
 
 
 @pytest.mark.parametrize('path,params', [
